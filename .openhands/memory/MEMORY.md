@@ -80,3 +80,31 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   thousand unmapped reads (SHARC/uart/comm apertures not yet modelled).
 - `main.cpp` takes an optional 3rd arg = instruction count (default 1000) for
   longer soak runs: `./build/sage roms/doa.zip doa 5000000`.
+
+## Task 3: video/boot findings (2026-11-05)
+- **doa is a `model2b_0229` set** (317-0229 protection), NOT the SHARC `5881`
+  variant. The apparent boot hang is the intended per-frame VBLANK wait, not a
+  stall: the game is alive and rendering.
+- **The game boots to its own diagnostic screen**: "Motion Initialize Err!!
+  ERR ANIME = 0x00B0 / real anime name exit on ACODE.DEF / PUSH H or P or K!!
+  then NEXT ANIME Initialize!!". This is because the **SHARC/ADSP-21062 copro is
+  stubbed** (the 3D/geometry + motion engine never responds), so this is a
+  correct-looking, honest emulator state, not a video bug.
+- The tile layer decodes as ASCII in char RAM: `tilemap word = charcode |
+  (color<<7) | (0x8000 = category)`, so a rendered row of tile values is
+  literally the on-screen text. Decoding layer 0 (0x0000 offset) as 64x64
+  `chr(v&0xff)` is the fastest way to read what the game is printing.
+- **colorxlat stride is 0x200 bytes** (MAME `m_colorxlat` is `u16[]`; byte
+  offsets 0x80/0x4080/0x8080 are the >>1 bases doubled). The earlier 0x100
+  stride collapsed the palette. Palette resolves through
+  `m_colorxlat[base + ((pal>>shift)&0x1f)*0x200]` then a gamma LUT
+  `max((i-64)*255/191, 0)`.
+- `Video::map()` mirrors MAME: tile RAM 0x01000000 (mirror 0x110000), char RAM
+  0x01080000 (mirror 0x100000). Palette 0x01800000, colorxlat 0x01810000.
+- doa's loader verifies 22/23 ICs; `mpr-19324.19` is a known alternate dump
+  (D972201F vs MAME's 0D6BF454) — reported as "OK (alt dump)", not a failure.
+- Debug env hooks that proved useful: `SAGE_TRACE`, `SAGE_WATCH=lo:hi`
+  (+`SAGE_WATCH_R`), `SAGE_DISASM=hex:count`, `SAGE_DUMPVID`, `SAGE_DUMPRAW`,
+  `SAGE_PCORDER`, `SAGE_INTTAB`, `SAGE_PPM`, `SAGE_HEADLESS`, `SAGE_REALTIME`.
+- `build-rel`/`build` are git-ignored; the SDL build needs
+  `LD_LIBRARY_PATH=/opt/sdl2/usr/lib/x86_64-linux-gnu`.
