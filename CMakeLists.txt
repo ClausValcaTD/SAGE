@@ -25,7 +25,10 @@ FetchContent_MakeAvailable(miniz)
 
 add_executable(sage
     src/main.cpp
-    src/rom_loader.cpp)
+    src/rom_loader.cpp
+    src/bus.cpp
+    src/cpu/i960.cpp
+    src/cpu/i960dis.cpp)
 
 target_include_directories(sage PRIVATE include)
 target_link_libraries(sage PRIVATE miniz)

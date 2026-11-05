@@ -48,3 +48,35 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   optional CMake target `fetch-assets` (not part of the default build).
 - `.openhands/memory/legacy-openrom-memory.md` is stale content from an unrelated
   OpenROM Marketplace project that previously occupied this path; ignore it.
+
+## i960 CPU core + Bus (Task 2, 2026-11-05)
+- `src/cpu/i960.cpp` + `i960dis.cpp` are standalone ports of MAME
+  `src/devices/cpu/i960/{i960,i960dis}.cpp` (BSD-3-Clause, Farfetch'd / R.
+  Belmont). Framework deps removed: `memory_access<>` -> `cpu::BusInterface`,
+  `fatalerror` -> `cpu::Fault` exception, `save_item`/`state_add` dropped,
+  `util::stream_format` -> local `fmt()`.
+- **Critical porting bug to remember**: MAME's `util::sext(v, bits)` must MASK to
+  the low `bits` bits before sign-extending. Writing it as `(v ^ m) - m` without
+  the mask silently corrupts `get_disp_s` (13-bit COBR branch displacement) and
+  makes the CPU jump to garbage (IP became 0x3DA44420 instead of 0x420).
+- MAME's `m_icount` is a *remaining budget*; `execute_op` DECREMENTS it. The
+  standalone `step()` sets `m_icount = 1` then returns `1 - m_icount` (so a
+  `-9` call yields 10 cycles, matching `execute_min_cycles()==1`).
+- `BusInterface` reads are `const` (the disassembler takes a `const BusInterface&`);
+  the Bus diagnostic counters are therefore `mutable`.
+- `BusInterface::burst(addr)` mirrors MAME's per-map-entry
+  `flags(i960_cpu_device::BURST)`: ROM/RAM true, register/FIFO apertures false.
+  Multi-word loads (`ldl`/`ldt`/`ldq`) only advance the address on BURST.
+- Model 2B map implemented (subset of `model2b_0229_mem`): ROM 0x0, work RAM
+  0x00200000 & 0x00500000, geo 0x00800000, buffer RAM 0x00900000
+  (0x80000-mirror), CPU ctl 0x00E00000 (0x38), IRQ ctl 0x00E80000, timers
+  0x00F00000, palette 0x01800000, backup 0x01D00000, main_data ROM
+  0x02000000 & 0x06000000, texture RAM 0x11000000/0x11200000
+  (0x100000-mirror), luma 0x11400000.
+- **Boot is real**: reset reads SAT=0, PRCB=0xB0, entry IP=0x410. The first
+  block (0x410-0x458) copies a 26-entry dword table from ROM 0x3D0 to the CPU
+  control block at 0xE00000; IP then walks 0x634 -> 0x668 (clearing 32MiB of
+  work RAM) -> 0x724C. 6M instructions reaches 0x724C with a few hundred
+  thousand unmapped reads (SHARC/uart/comm apertures not yet modelled).
+- `main.cpp` takes an optional 3rd arg = instruction count (default 1000) for
+  longer soak runs: `./build/sage roms/doa.zip doa 5000000`.

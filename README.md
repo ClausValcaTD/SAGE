@@ -14,10 +14,16 @@ SAGE/
 ├── CMakeLists.txt          C++20 build, FetchContent miniz
 ├── include/sage/
 │   ├── rom_loader.h        RomLoader interface
-│   └── types.h             Region / RomVerify / LoadReport
+│   ├── types.h             Region / RomVerify / LoadReport
+│   ├── bus.h               Model 2B memory interconnect
+│   └── cpu/i960.h          standalone i960 CPU + disassembler
 ├── src/
-│   ├── main.cpp            CLI + status tables
-│   └── rom_loader.cpp      ROM table + load/verify implementation
+│   ├── main.cpp            CLI, status tables, boot trace
+│   ├── rom_loader.cpp      ROM table + load/verify implementation
+│   ├── bus.cpp             address decoding + RAM/ROM
+│   └── cpu/
+│       ├── i960.cpp        instruction interpreter
+│       └── i960dis.cpp     instruction disassembler
 ├── scripts/fetch_assets.sh downloads references + doa.zip
 ├── references/             MAME sources + Supermodel (git-ignored)
 └── roms/                   doa.zip (git-ignored)
@@ -37,11 +43,27 @@ This pulls the MAME Model 2 driver sources, a shallow clone of Supermodel
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/sage                    # optionally: ./build/sage <zip> <doa|doab>
+./build/sage                          # optionally: ./build/sage <zip> <doa|doab> [instructions]
 ```
 
 The loader prints each ROM IC with its verified CRC32, the mapped memory
-regions, and the program memory range.
+regions, and the program memory range. It then resets the i960, prints the boot
+vector (SAT/PRCB/IP read from 0x00000000), and steps the CPU for 1000
+instructions with a disassembled trace of the first 20 and a checkpoint every
+200.
+
+## CPU core
+
+`src/cpu/i960.cpp` is a standalone port of MAME's `src/devices/cpu/i960` core
+(BSD-3-Clause, Farfetch'd / R. Belmont) with the MAME device framework removed:
+the `memory_access<>` cache is replaced by a `BusInterface`, `fatalerror()` by a
+recoverable `Fault` exception, and state registration / `save_item` dropped.
+Instruction semantics are kept verbatim so traces match MAME's.
+
+`Bus` (src/bus.cpp) decodes the subset of `model2b_0229_mem()` the boot path
+touches: program ROM at 0x00000000, `main_data` ROM at 0x02000000/0x06000000,
+work RAM, buffer/palette/texture/luma RAM, and the CPU-control register block at
+0x00e00000. Unmapped accesses are counted and return 0 rather than faulting.
 
 ## Notes
 
