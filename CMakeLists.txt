@@ -42,6 +42,7 @@ add_executable(sage
     src/io.cpp
     src/protection.cpp
     src/video.cpp
+    src/geometry.cpp
     src/cpu/i960.cpp
     src/cpu/i960dis.cpp
     src/cpu/sharc.cpp)

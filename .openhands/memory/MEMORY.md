@@ -154,3 +154,40 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   next milestone. Screen shows the game's own tile/logo output now, not the error.
 - Debug hooks added: `SAGE_SHARC_PC` (PM PC histogram), `SAGE_SHARC_DUMP=base:count`
   (PM 48-bit words around PC), `SAGE_SHARC_EXT`, `SAGE_PROT_TRACE` (removed).
+
+## TASK 6 root cause: no 3D because the GEO path is entirely unwired (2026-11-05)
+- DOA pushes ~55k dwords/frame into the GEO **program FIFO** at `0x00804000`
+  (`model2b_state::geo_prg_w`) and toggles `m_geo_write/read_start` between 0x0 and
+  0x10000 via `0x00801008`/`0x00803008` (double buffering). But `Bus::map()`
+  mapped `0x00800000-0x00803fff` and `0x00804000-0x00807fff` to plain RAM
+  (`m_geo`, `m_geo_prg`) **before** the register handlers, so `geo_write()`
+  and `geo_prg_w()` were dead code: `m_bufferram` was never filled and
+  `geo_parse()` was never called. SAGE's `trigger_vblank()` only raised IRQ0.
+- Fix: unshadow the two GEO windows (route them to a new `Geometry` module),
+  port the geometry engine + rasterizer, and call `geo_parse()` at vblank.
+- `pz`/`pu`/`pv` are macros: `p[0]`/`p[1]`/`p[2]` of `poly_manager::vertex_t`
+  (MaxParams=4). `raster_state` is heap-allocated in MAME (make_unique) — the
+  poly_list is 32768 * ~180B, so keep it off the stack (use vectors).
+- MAME screen_update order: tiles {3,2} opaque -> tiles {1,0} transparent ->
+  3D polygons -> tiles {(layer<<1)|1} sprites. Tilemap layer L reads map words at
+  L*0x1000; scroll regs tile_ram[0x5000+L]/[0x5004+L] (word offsets).
+- DOA H/V sync: `0x01040000`=0xFFA4 -> crtc_xoffset = 84-92 = -8;
+  `0x01060000`=0xFFD8 -> crtc_yoffset = 130-40 = 90. Renderer defaults are
+  xoffs=90, yoffs=-8 (differ from crtc until the game writes them).
+
+## TASK 6 / T4 root cause: 3D is black because the GEO engine is never booted (2026-11-05)
+- Instrumented trace of `geo_prg_write()` (0x00804000 FIFO) shows the i960 only ever
+  pushes **zero dwords** with `geoctl == 0x80000000` (geo *upload* mode). `set_geoctl`
+  never sees the high bit clear, so `geo_prg_write` never calls `push_geo_data`, and
+  `m_bufferram` keeps its reset pattern `0x07800F0F` (= GEO "end" opcode, function 0x0F).
+- Consequence: `geo_parse()` runs but immediately hits the init pattern and ends with
+  0 polygons. The earlier "407k polygons rendered" figure came from `render_one()`
+  being invoked on stale/garbage polygon entries, not real DOA geometry.
+- So the black 3D is **not** a viewport/clip bug. It is the same root cause already
+  recorded for the copro: the i960 stalls before it can hand the geometry list to the
+  SHARC, which is the Model 2B path that actually feeds the GEO engine. Fixing it means
+  making the SHARC copro command path run (upload program, exchange FIFO commands) so
+  the i960 boots geo (`geoctl` high bit cleared) and writes the real display list.
+- `m_xoffs=90 / m_yoffs=-8` renderer defaults and `crtc_xoffset`/`crtc_yoffset` from
+  `0x01040000`/`0x01060000` are correct; `poly.viewport[]` parsed from window data
+  (0x0003) is correct (`vpraw=[8,90,504,474]`).

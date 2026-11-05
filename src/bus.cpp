@@ -44,8 +44,6 @@ constexpr std::size_t kRam0020Size = 0x00040000;
 constexpr std::size_t kWorkRamSize = 0x00100000;
 constexpr std::size_t kBufferRamSize = 0x00020000;  // mirrored across 0x80000
 constexpr std::size_t kBackupSize = 0x00004000;
-constexpr std::size_t kGeoSize = 0x00004000;
-constexpr std::size_t kGeoPrgSize = 0x00004000;
 constexpr std::size_t kCpuCtlSize = 0x00000038;
 constexpr std::size_t kProtSize = 0x00008000;
 constexpr std::size_t kTextureSize = 0x00100000;  // mirrored across 0x100000
@@ -88,8 +86,14 @@ void Bus::attach(const RomLoader& roms) {
     m_ram_0020.assign(kRam0020Size, 0);
     m_backup.assign(kBackupSize, 0xff);  // NVRAM DEFAULT_ALL_1
     m_bufferram.assign(kBufferRamSize, 0);
-    m_geo.assign(kGeoSize, 0);
-    m_geo_prg.assign(kGeoPrgSize, 0);
+    // MAME's model2_state::machine_reset() pre-fills buffer RAM with this
+    // pattern; the geometry engine parses it before the game uploads a list.
+    for (std::size_t i = 0; i + 3 < m_bufferram.size(); i += 4) {
+        m_bufferram[i + 0] = 0x0f;
+        m_bufferram[i + 1] = 0x0f;
+        m_bufferram[i + 2] = 0x80;
+        m_bufferram[i + 3] = 0x07;
+    }
     m_cpu_ctl.assign(kCpuCtlSize, 0);
     m_prot_ram.assign(kProtSize, 0);
     m_luma.assign(0x8000, 0);
@@ -197,6 +201,21 @@ void Bus::attach(const RomLoader& roms) {
 
     if (const Region* cd = roms.region("copro_data"))
         m_copro_data = cd->data;
+
+    // 3D geometry: share buffer RAM, the texture/polygon ROMs and the video RAM
+    // the rasteriser reads (MAME wires these as device tags on the renderer).
+    m_geometry.reset();
+    m_geometry.set_buffer_ram(reinterpret_cast<std::uint32_t*>(m_bufferram.data()),
+                              m_bufferram.size() / 4);
+    if (const Region* tex = roms.region("textures"))
+        m_geometry.set_texture_rom(tex->data.data(), tex->data.size());
+    if (const Region* poly = roms.region("polygons"))
+        m_geometry.set_polygon_rom(poly->data.data(), poly->data.size());
+    m_geometry.set_texture_ram(reinterpret_cast<std::uint32_t*>(m_textureram0.data()),
+                               reinterpret_cast<std::uint32_t*>(m_textureram1.data()));
+    m_geometry.set_luma_ram(m_luma.data());
+    m_geometry.set_palette_ram(m_video.palram().data(), m_video.colorxlat().data());
+    m_video.set_geometry(&m_geometry);
 }
 
 std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) const {
@@ -213,14 +232,9 @@ std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) cons
         writable = true;
         return const_cast<std::uint8_t*>(m_workram.data()) + (addr - kWorkRamBase);
     }
-    if (in_range(addr, len, kGeoBase, m_geo.size())) {
-        writable = true;
-        return const_cast<std::uint8_t*>(m_geo.data()) + (addr - kGeoBase);
-    }
-    if (in_range(addr, len, kGeoPrgBase, m_geo_prg.size())) {
-        writable = true;
-        return const_cast<std::uint8_t*>(m_geo_prg.data()) + (addr - kGeoPrgBase);
-    }
+    // The GEO windows (0x00800000-0x00807fff) are decoded by the Geometry
+    // module through the register path, not as plain RAM (MAME maps them to
+    // geo_r/geo_w and geo_prg_r/geo_prg_w).
     if (in_mirror(addr, len, kBufferRamBase, m_bufferram.size(), 0x80000)) {
         writable = true;
         return const_cast<std::uint8_t*>(m_bufferram.data()) +
@@ -365,6 +379,7 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
             }
             case 2:  // GEO control 1
                 m_geoctl = (m_geoctl & ~mask) | (static_cast<std::uint32_t>(data) << (lane * 8));
+                m_geometry.set_geoctl(m_geoctl);
                 return true;
             case 3:  // video control
                 m_videoctl = (m_videoctl & ~mask) | (static_cast<std::uint32_t>(data) << (lane * 8));
@@ -613,7 +628,22 @@ void Bus::write32(std::uint32_t addr, std::uint32_t val) {
     }
 
     if (addr >= kGeoBase && addr < kGeoBase + 0x4000) {
-        geo_write(addr - kGeoBase, val);
+        m_geometry.geo_write(addr - kGeoBase, val);
+        return;
+    }
+    if (addr >= kGeoPrgBase && addr < kGeoPrgBase + 0x4000) {
+        m_geometry.geo_prg_write(val);
+        return;
+    }
+
+    // System 24 H/V sync outputs. MAME maps these `.nopw()`, but the 3D renderer
+    // derives its viewport offset from them (horizontal_sync_w/vertical_sync_w).
+    if (addr >= 0x01040000 && addr < 0x01060000) {
+        m_video.write_hsync(addr & 3, val);
+        return;
+    }
+    if (addr >= 0x01060000 && addr < 0x01080000) {
+        m_video.write_vsync(addr & 3, val);
         return;
     }
 
@@ -737,43 +767,14 @@ void Bus::trigger_vblank() {
     m_framenum++;
     ++m_vblank_count;
 
+    // MAME's screen_vblank() parses the geometry display list each vblank.
+    m_geometry.parse();
+
     const std::uint32_t line = 1u << 0;
     if (m_intena & line) {
         m_intreq |= line;
         irq_update();
     }
-}
-
-void Bus::geo_write(std::uint32_t offset, std::uint32_t data) {
-    const std::uint32_t address = offset;
-    if (address < 0x1000) {
-        std::uint32_t r;
-        if (data & 0x80000000) {
-            r = (data & 0x800fffff) | (((address >> 4) & 0x3f) << 23);
-        } else if ((address & 0xf) == 0) {
-            r = (data & 0x000fffff) | (((address >> 4) & 0x3f) << 23);
-            if ((address >> 4) & 0xc0) {
-                if (((address >> 4) & 0x3f) == 1)
-                    r |= ((address >> 10) & 3) << 29;  // eye mode (Sega Rally)
-            }
-        } else {
-            return;
-        }
-        m_bufferram[(m_geo_write_addr / 4) % (m_bufferram.size() / 4)] = r;
-        m_geo_write_addr += 4;
-    } else if (address == 0x1008) {
-        m_geo_write_addr = data & 0xfffff;
-    } else if (address == 0x3008) {
-        m_geo_read_addr = data & 0xfffff;
-    }
-}
-
-std::uint32_t Bus::geo_read(std::uint32_t offset) const {
-    if (offset == 0x2008)
-        return m_geo_write_addr;
-    if (offset == 0x3008)
-        return m_geo_read_addr;
-    return 0;
 }
 
 // ---- SHARC coprocessor -----------------------------------------------------

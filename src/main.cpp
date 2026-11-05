@@ -112,6 +112,8 @@ void print_bus_state(const sage::Bus& bus, const sage::cpu::I960& cpu) {
     std::printf("  IRQ immediate    : %" PRIu64 "\n", cpu.irq_immediate_count());
     std::printf("  IRQ pending      : %" PRIu64 "\n", cpu.irq_pending_count());
     std::printf("  IRQ taken        : %" PRIu64 "\n", cpu.irq_taken_count());
+    std::printf("  GEO parses       : %" PRIu64 "  polygons rendered: %" PRIu64 "\n",
+                bus.geometry().parse_count(), bus.geometry().polygons_rendered());
     std::printf("------------------------------------------------------------\n\n");
 }
 
@@ -184,7 +186,7 @@ int main(int argc, char** argv) {
     if (const char* w = std::getenv("SAGE_WATCH")) {
         unsigned lo = 0, hi = 0;
         std::sscanf(w, "%x:%x", &lo, &hi);
-        bus.set_watch(lo, hi, 40, std::getenv("SAGE_WATCH_R") != nullptr);
+        bus.set_watch(lo, hi, 200000, std::getenv("SAGE_WATCH_R") != nullptr);
     }
 
     sage::cpu::I960 cpu(bus);
@@ -405,6 +407,23 @@ int main(int argc, char** argv) {
     if (const char* ppm = std::getenv("SAGE_PPM"))
         if (write_ppm(ppm, bus.video()))
             std::printf("Frame written to %s\n\n", ppm);
+
+    if (const char* ppm3d = std::getenv("SAGE_PPM3D")) {
+        const std::uint32_t* px = bus.geometry().render();
+        if (std::FILE* f = std::fopen(ppm3d, "wb")) {
+            std::fprintf(f, "P6\n%d %d\n255\n", sage::Geometry::kWidth, sage::Geometry::kHeight);
+            for (int y = 0; y < sage::Geometry::kHeight; ++y)
+                for (int x = 0; x < sage::Geometry::kWidth; ++x) {
+                    const std::uint32_t c = px[y * sage::Geometry::kWidth + x];
+                    const std::uint8_t rgb[3] = {static_cast<std::uint8_t>(c >> 16),
+                                                 static_cast<std::uint8_t>(c >> 8),
+                                                 static_cast<std::uint8_t>(c)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+            std::fclose(f);
+            std::printf("Geometry frame written to %s\n\n", ppm3d);
+        }
+    }
 
     if (std::getenv("SAGE_SHARC_PC")) {
         std::vector<std::pair<std::uint64_t, std::uint32_t>> v;

@@ -5,13 +5,16 @@
 
 namespace sage {
 
+class Geometry;
+
 // Sega Model 2 video subsystem: palette / colour-translation RAM, the System 24
-// tile generator (char + tile RAM) and the direct framebuffer. It decodes the
-// video apertures of MAME's model2_base_mem()/model2b_crx_mem() and renders the
-// visible 496x384 area into an RGBA buffer for the SDL display.
+// tile generator (char + tile RAM), the direct framebuffer and the 3D polygon
+// layer. It decodes the video apertures of MAME's model2_base_mem() /
+// model2b_crx_mem() and renders the visible 496x384 area into an RGBA buffer
+// for the SDL display.
 //
-// The 3D polygon rasteriser is out of scope; the direct framebuffer and the
-// System 24 tile layers are what this class produces.
+// screen_update() order (model2_v.cpp): tilemaps {3,2} opaque, tilemaps {1,0}
+// transparent, the 3D polygons, then tilemaps {(layer<<1)|1} sprites.
 class Video {
 public:
     static constexpr int kWidth = 496;
@@ -31,6 +34,14 @@ public:
     // Called by the bus after a store into palette RAM.
     void mark_palette_dirty() { m_palette_dirty = true; }
 
+    // System 24 H/V sync outputs (0x01040000 / 0x01060000, nopw in MAME but the
+    // 3D renderer consumes them as the CRTC viewport offset).
+    void write_hsync(unsigned lane, std::uint8_t val);
+    void write_vsync(unsigned lane, std::uint8_t val);
+
+    // Wires the 3D geometry layer that render() composites over the tilemaps.
+    void set_geometry(Geometry* geometry) { m_geometry = geometry; }
+
     // Rebuilds the RGBA frame from the current palette, tile and framebuffer RAM.
     void render();
 
@@ -49,11 +60,13 @@ public:
     bool render_test_mode() const { return m_render_test_mode; }
 
     std::uint16_t video_control() const { return m_videoctl; }
+    std::uint16_t hsync_output() const { return m_xhout; }
+    std::uint16_t vsync_output() const { return m_xvout; }
 
 private:
     void rebuild_palette();
     std::uint32_t palette_entry(int index) const;
-    void draw_tile_layers();
+    void draw_tile_layers(int group);
     void draw_framebuffer();
 
     std::vector<std::uint8_t> m_palram;     // 0x01800000, 0x4000 bytes
@@ -64,6 +77,8 @@ private:
     std::vector<std::uint32_t> m_palette;   // 0x2000 RGBA entries
     std::vector<std::uint32_t> m_rgba;      // kWidth * kHeight
 
+    Geometry* m_geometry = nullptr;
+
     int m_fb_bank = 0;
     bool m_palette_dirty = true;
     bool m_render_test_mode = false;
@@ -73,3 +88,4 @@ private:
 };
 
 }  // namespace sage
+

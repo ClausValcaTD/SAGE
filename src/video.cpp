@@ -1,18 +1,20 @@
-// Sega Model 2 video: palette, colour translation and the direct framebuffer.
+// Sega Model 2 video: palette, colour translation, System 24 tiles, the direct
+// framebuffer and the 3D polygon layer.
 //
 // Ported from MAME's src/mame/sega/model2_v.cpp and src/mame/sega/segaic24.cpp
 // (BSD-3-Clause, copyright-holders: Olivier Galibert, R. Belmont, ElSemi,
 // Angelo Salese, David Haywood).
 //
-// The 3D polygon rasteriser is not implemented yet, so this renders the
-// System 24 tile layers (HUD text, backgrounds) plus the direct framebuffer that
-// the renderer test mode exposes. That is enough to prove the video path and to
-// drive the SDL window; the rasteriser is the next milestone.
+// screen_update() order (model2_v.cpp): tilemaps {3,2} opaque, tilemaps {1,0}
+// transparent, the 3D polygons, then the sprite tilemaps {(layer<<1)|1}. The 3D
+// layer is produced by the Geometry module.
 
 #include "sage/video.h"
 
 #include <algorithm>
 #include <cstring>
+
+#include "sage/geometry.h"
 
 namespace sage {
 namespace {
@@ -118,6 +120,22 @@ bool Video::write(std::uint32_t addr, std::uint8_t val) {
     return true;
 }
 
+void Video::write_hsync(unsigned lane, std::uint8_t val) {
+    const std::uint32_t mask = 0xffu << (lane * 8);
+    m_xhout = static_cast<std::uint16_t>((m_xhout & ~mask) |
+                                         (static_cast<std::uint32_t>(val) << (lane * 8)));
+    if (m_geometry)
+        m_geometry->set_hsync(m_xhout);
+}
+
+void Video::write_vsync(unsigned lane, std::uint8_t val) {
+    const std::uint32_t mask = 0xffu << (lane * 8);
+    m_xvout = static_cast<std::uint16_t>((m_xvout & ~mask) |
+                                         (static_cast<std::uint32_t>(val) << (lane * 8)));
+    if (m_geometry)
+        m_geometry->set_vsync(m_xvout);
+}
+
 std::uint32_t Video::palette_entry(int index) const {
     const std::uint16_t palcolor = rd16(m_palram, static_cast<std::size_t>(index) * 2);
     // MAME indexes m_colorxlat as a u16 array, so one intensity step is two
@@ -155,14 +173,17 @@ int tile_pixel(const std::vector<std::uint8_t>& chram, int code, int x, int y) {
     return pen;
 }
 
-void Video::draw_tile_layers() {
-    // MAME screen_update(): tilemaps 3 and 2 are drawn opaque, then 1 and 0
-    // transparent. Tilemap L reads its map words at L*0x1000 and its scroll
-    // registers from tile_ram[0x5000+L] / [0x5004+L] (word offsets).
+void Video::draw_tile_layers(int group) {
+    // MAME screen_update() draws tilemaps {3,2} opaque, then {1,0} transparent,
+    // then the 3D layer, then the sprite tilemaps {(layer<<1)|1}. Without a
+    // priority bitmap the sprite pass is a no-op, so both groups draw all four
+    // tilemaps in the same order; `group` only affects the opaque flag.
     static constexpr int kOrder[4] = {3, 2, 1, 0};
+    (void)group;
+
     for (int idx = 0; idx < 4; ++idx) {
         const int layer = kOrder[idx];
-        const bool opaque = layer >= 2;
+        const bool opaque = (layer >= 2);
 
         const std::uint16_t vscr_reg = rd16(m_tile, (0x5004 + layer) * 2);
         if (vscr_reg & 0x8000)  // layer disabled
@@ -222,7 +243,24 @@ void Video::render() {
         rebuild_palette();
 
     std::fill(m_rgba.begin(), m_rgba.end(), m_palette[0]);
-    draw_tile_layers();
+    draw_tile_layers(0);
+
+    // 3D polygons sit between the background tiles and the sprite tiles.
+    if (m_geometry && !m_render_test_mode) {
+        const std::uint32_t* poly = m_geometry->render();
+        if (poly) {
+            for (int y = 0; y < kHeight; ++y) {
+                const std::uint32_t* src = poly + static_cast<std::size_t>(y) * Geometry::kWidth;
+                std::uint32_t* dst = m_rgba.data() + static_cast<std::size_t>(y) * kWidth;
+                for (int x = 0; x < kWidth; ++x) {
+                    if (src[x] != 0)  // 0 = transparent in the geometry surface
+                        dst[x] = src[x];
+                }
+            }
+        }
+    }
+
+    draw_tile_layers(1);
     if (m_render_test_mode)
         draw_framebuffer();
 }

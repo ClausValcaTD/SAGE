@@ -10,6 +10,7 @@
 #include "sage/cpu/i960.h"
 #include "sage/cpu/sharc.h"
 #include "sage/eeprom.h"
+#include "sage/geometry.h"
 #include "sage/io.h"
 #include "sage/protection.h"
 #include "sage/rom_loader.h"
@@ -86,6 +87,10 @@ public:
     const Video& video() const { return m_video; }
     const std::uint32_t* framebuffer() const { return m_video.rgba(); }
 
+    // ---- 3D geometry ------------------------------------------------------
+    Geometry& geometry() { return m_geometry; }
+    const Geometry& geometry() const { return m_geometry; }
+
     // Diagnostic counters.
     mutable std::uint64_t unmapped_reads = 0;
     mutable std::uint64_t unmapped_writes = 0;
@@ -129,8 +134,6 @@ private:
     void irq_update();
     void eeprom_write(std::uint8_t data);
     std::uint8_t in0_read() const;
-    void geo_write(std::uint32_t offset, std::uint32_t data);
-    std::uint32_t geo_read(std::uint32_t offset) const;
     void copro_fifo_w(std::uint32_t data);
     void copro_function_port_w(std::uint32_t offset, std::uint32_t data);
     std::uint32_t copro_fifo_r() const;
@@ -167,8 +170,6 @@ private:
     std::vector<std::uint8_t> m_ram_0020;     // 0x00200000 (256 KiB)
     std::vector<std::uint8_t> m_backup;       // 0x01d00000 (16 KiB)
     std::vector<std::uint8_t> m_bufferram;    // 0x00900000 (128 KiB, 0x80000-mirrored)
-    std::vector<std::uint8_t> m_geo;          // 0x00800000 (16 KiB)
-    std::vector<std::uint8_t> m_geo_prg;      // 0x00804000 (16 KiB)
     std::vector<std::uint8_t> m_cpu_ctl;      // 0x00e00000 (0x38)
     std::vector<std::uint8_t> m_prot_ram;     // 0x01d80000 (32 KiB, 0229 source window)
     std::vector<std::uint8_t> m_luma;         // 0x11400000 (32 KiB)
@@ -176,6 +177,7 @@ private:
     std::vector<std::uint8_t> m_textureram1;  // 0x11200000 (1 MiB, 0x100000-mirrored)
 
     Video m_video;
+    Geometry m_geometry;
     mutable Io3155649 m_io;  // register reads have side effects
     Eeprom93C46 m_eeprom;
     mutable Sega3155838Comp m_protection{Sega3155838Comp::Variant::Sega3170229};
@@ -198,9 +200,7 @@ private:
     std::uint32_t m_timer_orig[4] = {0xfffff, 0xfffff, 0xfffff, 0xfffff};
     bool m_timer_run[4] = {false, false, false, false};
 
-    // GEO upload state.
-    std::uint32_t m_geo_write_addr = 0;
-    std::uint32_t m_geo_read_addr = 0;
+    // GEO upload state is owned by the Geometry module (m_geometry).
     std::uint32_t m_geoctl = 0;
 
     // SHARC coprocessor mailbox and interpreter.
