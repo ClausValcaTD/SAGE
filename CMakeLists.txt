@@ -43,7 +43,8 @@ add_executable(sage
     src/protection.cpp
     src/video.cpp
     src/cpu/i960.cpp
-    src/cpu/i960dis.cpp)
+    src/cpu/i960dis.cpp
+    src/cpu/sharc.cpp)
 
 target_include_directories(sage PRIVATE include)
 target_link_libraries(sage PRIVATE miniz)

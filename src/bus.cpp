@@ -122,6 +122,79 @@ void Bus::attach(const RomLoader& roms) {
 
     m_eeprom.reset();
     m_video.reset();
+
+    // SHARC coprocessor: reset into the host boot state and wire its external
+    // data port to the Model 2B coprocessor map (FIFOs, buffer RAM, copro ROM).
+    m_sharc.set_boot_mode(cpu::Sharc::BootMode::Host);
+    m_sharc.reset();
+    m_sharc.set_external_port(
+        [this](std::uint32_t addr, std::uint32_t& data) -> bool {
+            if (addr >= 0x00400000 && addr < 0x00c00000) {  // copro FIFO in
+                data = m_fifo_in.pop();
+                copro_update_flags();
+                return true;
+            }
+            if (addr >= 0x01400000 && addr < 0x01c00000) {  // copro buffer RAM
+                const std::size_t i = (addr - 0x01400000) >> 2;
+                std::uint32_t v = 0;
+                const std::size_t o = (i & 0x7fff) * 4;
+                if (o + 3 < m_bufferram.size())
+                    v = std::uint32_t(m_bufferram[o]) |
+                        (std::uint32_t(m_bufferram[o + 1]) << 8) |
+                        (std::uint32_t(m_bufferram[o + 2]) << 16) |
+                        (std::uint32_t(m_bufferram[o + 3]) << 24);
+                data = v;
+                return true;
+            }
+            if (addr >= 0x01c00000 && addr < 0x01e00000) {  // copro_data ROM
+                if (!m_copro_data.empty()) {
+                    const std::size_t i = (addr - 0x01c00000) >> 2;
+                    const std::size_t o = (i & 0x1fffff) * 4;
+                    if (o + 3 < m_copro_data.size())
+                        data = std::uint32_t(m_copro_data[o]) |
+                               (std::uint32_t(m_copro_data[o + 1]) << 8) |
+                               (std::uint32_t(m_copro_data[o + 2]) << 16) |
+                               (std::uint32_t(m_copro_data[o + 3]) << 24);
+                    else
+                        data = 0;
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        },
+        [this](std::uint32_t addr, std::uint32_t data) {
+            if (addr >= 0x00c00000 && addr < 0x01400000) {  // copro FIFO out
+                m_fifo_out.push(data);
+                copro_update_flags();
+                return;
+            }
+            if (addr >= 0x01400000 && addr < 0x01c00000) {  // copro buffer RAM
+                const std::size_t o = ((addr - 0x01400000) >> 2 & 0x7fff) * 4;
+                if (o + 3 < m_bufferram.size()) {
+                    m_bufferram[o] = static_cast<std::uint8_t>(data);
+                    m_bufferram[o + 1] = static_cast<std::uint8_t>(data >> 8);
+                    m_bufferram[o + 2] = static_cast<std::uint8_t>(data >> 16);
+                    m_bufferram[o + 3] = static_cast<std::uint8_t>(data >> 24);
+                }
+            }
+        });
+
+    m_fifo_in.cap = 16;
+    m_fifo_out.cap = 16;
+    m_fifo_in.clear();
+    m_fifo_out.clear();
+    m_coproctl = 0;
+    m_coprocnt = 0;
+    // MAME's model2b_state::machine_reset() asserts HALT on the ADSP and only
+    // clears it from copro_ctl1_w(), so the SHARC must not execute until the
+    // i960 has uploaded its program.
+    m_copro_halted = true;
+    m_copro_program_upload = false;
+    copro_update_flags();
+
+    if (const Region* cd = roms.region("copro_data"))
+        m_copro_data = cd->data;
 }
 
 std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) const {
@@ -217,8 +290,8 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
             case 0:  // copro control 1
                 out = byte_lane(m_coproctl, lane);
                 return true;
-            case 1:  // copro FIFO control: output FIFO always empty
-                out = lane == 0 ? 1 : 0;
+            case 1:  // copro FIFO control: bit 0 set while the output FIFO is empty
+                out = byte_lane(m_fifo_out.empty() ? 1u : 0u, lane);
                 return true;
             case 2:  // GEO control 1
                 out = byte_lane(m_geoctl, lane);
@@ -279,12 +352,10 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
     if (addr >= kCoproCtlBase && addr < kCoproCtlBase + 0x1000) {
         const std::uint32_t mask = 0xffu << (lane * 8);
         switch ((addr - kCoproCtlBase) >> 2) {
-            case 0: {  // copro control 1: high-bit edge starts/stops the upload
+            case 0: {  // copro control 1: high-bit edge halts / boots the copro
                 const std::uint32_t nv =
                     (m_coproctl & ~mask) | (static_cast<std::uint32_t>(data) << (lane * 8));
-                if ((nv ^ m_coproctl) == 0x80000000u && (nv & 0x80000000u))
-                    m_coprocnt = 0;
-                m_coproctl = nv;
+                copro_ctl1_write(nv);
                 return true;
             }
             case 2:  // GEO control 1
@@ -299,11 +370,11 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
     }
 
     if (addr >= kCoproFunctionBase && addr < kCoproFunctionBase + 0x4000)
-        return true;  // SHARC function port; the coprocessor is stubbed
+        return true;  // SHARC function port is write-only
     if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000)
         return true;
     if (addr >= kCoproIopBase && addr < kCoproIopBase + 0x1000)
-        return true;
+        return true;  // SHARC IOP port is write-only
 
     if (addr >= kUartBase && addr < kUartBase + 8)
         return true;
@@ -432,6 +503,9 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
         return static_cast<std::uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) |
                                           (static_cast<std::uint32_t>(p[3]) << 24));
 
+    if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000)
+        return copro_fifo_r();
+
     if (addr >= kProtBase + 0x7ff8 && addr < kProtBase + 0x7ffc) {
         const std::uint32_t lo = read16(addr);
         const std::uint32_t hi = read16(addr + 2);
@@ -525,7 +599,16 @@ void Bus::write32(std::uint32_t addr, std::uint32_t val) {
         return;
     }
     if (addr >= kCoproIopBase && addr < kCoproIopBase + 0x1000) {
-        copro_fifo_w(val);
+        try {
+            // MAME registers this window on the i960's 32-bit space, so the
+            // device handler receives a word index (byte address >> 2).
+            m_sharc.external_iop_write((addr - kCoproIopBase) >> 2, val);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "IOP write fault addr=%08X off=%03X val=%08X pc=%08X: %s\n",
+                         addr, (addr - kCoproIopBase) >> 2, val,
+                         m_cpu ? m_cpu->get_ip() : 0, e.what());
+            m_copro_halted = true;
+        }
         return;
     }
 
@@ -663,15 +746,97 @@ std::uint32_t Bus::geo_read(std::uint32_t offset) const {
     return 0;
 }
 
-void Bus::copro_fifo_w(std::uint32_t data) {
-    (void)data;
-    if (m_coproctl & 0x80000000)
-        m_coprocnt++;  // SHARC program upload; the coprocessor is stubbed
+// ---- SHARC coprocessor -----------------------------------------------------
+
+void Bus::copro_update_flags() const {
+    // FLAG0 mirrors the input FIFO empty state, FLAG1 the output FIFO full state.
+    m_sharc.set_flag_input(0, m_fifo_in.empty());
+    m_sharc.set_flag_input(1, m_fifo_out.full());
 }
 
-void Bus::copro_function_port_w(std::uint32_t offset, std::uint32_t data) {
-    const std::uint32_t d = (data & 0x800fffff) | (((offset >> 2) & 0xff) << 23);
-    (void)d;  // pushed into the SHARC input FIFO; stubbed.
+void Bus::copro_halt() {
+    m_copro_halted = true;
+    m_copro_program_upload = true;
+    m_coprocnt = 0;
+}
+
+void Bus::copro_boot() {
+    m_copro_halted = false;
+    m_copro_program_upload = false;
+    copro_update_flags();
+    if (std::getenv("SAGE_COPRO_TRACE")) {
+        std::fprintf(stderr, "[copro] boot: %u halfwords uploaded, PC=0x%06X\n",
+                     m_coprocnt, m_sharc.pc());
+        for (unsigned i = 0; i < 12; ++i)
+            std::fprintf(stderr, "[copro]   PM[%06X] = %012llX\n", 0x20004u + i,
+                         (unsigned long long)m_sharc.debug_pm48(0x20004u + i));
+    }
+}
+
+void Bus::copro_ctl1_write(std::uint32_t value) {
+    if (std::getenv("SAGE_COPRO_TRACE"))
+        std::fprintf(stderr, "[copro] ctl1 write %08X (old %08X) pc=%08X\n", value,
+                     m_coproctl, m_cpu ? m_cpu->get_ip() : 0);
+    // The high bit toggling selects halt (set) / boot (clear), matching
+    // model2_state::copro_ctl1_w.
+    if ((value ^ m_coproctl) == 0x80000000u) {
+        if (value & 0x80000000u)
+            copro_halt();
+        else
+            copro_boot();
+    }
+    m_coproctl = value;
+}
+
+void Bus::copro_fifo_w(std::uint32_t data) {
+    if (std::getenv("SAGE_COPRO_TRACE"))
+        std::fprintf(stderr, "[copro] fifo_w %08X (ctl=%08X cnt=%u) pc=%08X\n", data, m_coproctl,
+                     m_coprocnt, m_cpu ? m_cpu->get_ip() : 0);
+    if (m_coproctl & 0x80000000u) {
+        // Program upload phase: each 32-bit write carries a 16-bit halfword that
+        // external_dma_write() packs into 48-bit PM words.
+        m_sharc.external_dma_write(m_coprocnt, data & 0xffff);
+        ++m_coprocnt;
+    } else {
+        m_fifo_in.push(data);
+        copro_update_flags();
+    }
+}
+
+std::uint32_t Bus::copro_fifo_r() const {
+    const std::uint32_t v = m_fifo_out.pop();
+    if (std::getenv("SAGE_COPRO_TRACE"))
+        std::fprintf(stderr, "[copro] fifo_r %08X pc=%08X\n", v, m_cpu ? m_cpu->get_ip() : 0);
+    copro_update_flags();
+    return v;
+}
+
+void Bus::copro_function_port_w(std::uint32_t byte_offset, std::uint32_t data) {
+    // The i960 handler sees a word index; MAME then takes bits 2..9 of that as
+    // the 8-bit function selector.
+    const std::uint32_t a = ((byte_offset >> 2) >> 2) & 0xff;
+    const std::uint32_t d = (data & 0x800fffff) | (a << 23);
+    m_fifo_in.push(d);
+    copro_update_flags();
+}
+
+void Bus::tick_copro(int cycles) {
+    if (m_copro_halted || !m_copro_fault.empty()) return;
+    // SHARC 32 MHz vs i960 25 MHz: accumulate the fractional remainder so the
+    // two stay in step over long runs.
+    m_copro_phase += std::uint64_t(cycles) * 32;
+    const std::uint64_t sharc_cycles = m_copro_phase / 25;
+    m_copro_phase -= sharc_cycles * 25;
+    if (sharc_cycles) {
+        // A coprocessor fault must not take down the i960: record it, halt the
+        // SHARC and let the main CPU keep running (MAME would fatal-error here).
+        try {
+            m_sharc.run_cycles(static_cast<int>(sharc_cycles));
+        } catch (const std::exception& e) {
+            m_copro_fault = e.what();
+            m_copro_halted = true;
+        }
+    }
 }
 
 }  // namespace sage

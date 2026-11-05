@@ -30,6 +30,8 @@ bool Display::open(const char* title, int width, int height) {
         return false;
     }
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer)  // no GPU (headless container, VNC server, ...) - use the CPU blitter
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
         SDL_DestroyWindow(window);
         SDL_QuitSubSystem(SDL_INIT_VIDEO);

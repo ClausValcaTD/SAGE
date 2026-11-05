@@ -108,3 +108,26 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   `SAGE_PCORDER`, `SAGE_INTTAB`, `SAGE_PPM`, `SAGE_HEADLESS`, `SAGE_REALTIME`.
 - `build-rel`/`build` are git-ignored; the SDL build needs
   `LD_LIBRARY_PATH=/opt/sdl2/usr/lib/x86_64-linux-gnu`.
+
+## SAGE emulator bring-up (2026-11-05)
+- `scripts/fetch_assets.sh` pulls the MAME `model2.cpp/.h`, a shallow Supermodel
+  clone, and `doa.zip` (the archive.org path is nested + space-containing, so the
+  URL must be percent-encoded). `roms/`, `references/`, `build/`, `*.zip` are all
+  git-ignored.
+- **SHARC must start HALTED.** MAME's `model2b_state::machine_reset()` asserts
+  HALT on the ADSP21062 and only clears it from `copro_ctl1_w()`. Starting the
+  SHARC un-halted makes it fetch garbage before the i960 uploads the program
+  (PC ran off to 0x5AE24FEA). With the halt the boot lands exactly on PC=0x20004
+  and then sits in its idle loop at 0x20123 — correct.
+- MAME i960 device handlers receive **word offsets** (`byte >> 2`), so the copro
+  IOP window needs `(addr - kCoproIopBase) >> 2`.
+- The i960 main loop at 0x27E0 spins on a VBLANK semaphore at 0x54B150; the
+  IRQ0 handler at 0x7700/0x7838 sets it and the main loop clears it — this is
+  normal frame sync, NOT a hang. IRQ taken count tracks VBLANK count.
+- **SDL2 was absent and there is no `/opt/sdl2`.** It can be installed with
+  `sudo apt-get install libsdl2-dev` after `apt-get update` (the snapshot.debian.org
+  mirror 503/504s intermittently — retry with `--fix-missing`). `Display::open()`
+  now falls back to `SDL_RENDERER_SOFTWARE` when no GPU is present, so
+  `SDL_VIDEODRIVER=dummy` opens a window.
+- Video is still essentially black (2 distinct colors: black bg + a white
+  overlay) — tile/char/colorxlat/palette path is a separate, unfinished task.

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <utility>
 #include <string>
 #include <vector>
 
 #include "sage/cpu/i960.h"
+#include "sage/cpu/sharc.h"
 #include "sage/eeprom.h"
 #include "sage/io.h"
 #include "sage/protection.h"
@@ -65,6 +67,15 @@ public:
     std::uint32_t irq_request() const { return m_intreq; }
     std::uint32_t video_control() const { return m_videoctl; }
 
+    // ---- SHARC coprocessor ------------------------------------------------
+    // The ADSP-21062 runs the motion/collision program the i960 uploads through
+    // the coprocessor FIFOs. tick_copro() advances it in step with the i960.
+    void tick_copro(int cycles);
+    bool copro_halted() const { return m_copro_halted; }
+    std::uint64_t copro_instructions() const { return m_sharc.instructions(); }
+    std::uint32_t copro_pc() const { return m_sharc.pc(); }
+    const std::string& copro_fault() const { return m_copro_fault; }
+
     // ---- Video ------------------------------------------------------------
     // Render mode bit 2: true = 60 Hz, false = 30 Hz (matches MAME).
     bool render_mode() const { return (m_render_mode >> 2) & 1; }
@@ -120,6 +131,29 @@ private:
     std::uint32_t geo_read(std::uint32_t offset) const;
     void copro_fifo_w(std::uint32_t data);
     void copro_function_port_w(std::uint32_t offset, std::uint32_t data);
+    std::uint32_t copro_fifo_r() const;
+    void copro_ctl1_write(std::uint32_t value);
+    void copro_update_flags() const;
+    void copro_boot();
+    void copro_halt();
+
+    // Board-side coprocessor FIFOs (MAME generic_fifo_u32_device).
+    struct CoproFifo {
+        std::size_t cap = 16;
+        std::deque<std::uint32_t> q;
+        bool empty() const { return q.empty(); }
+        bool full() const { return q.size() >= cap; }
+        void clear() { q.clear(); }
+        void push(std::uint32_t v) { q.push_back(v); }
+        std::uint32_t pop() {
+            if (q.empty()) return 0;
+            const std::uint32_t v = q.front();
+            q.pop_front();
+            return v;
+        }
+    };
+    mutable CoproFifo m_fifo_in;
+    mutable CoproFifo m_fifo_out;
 
     std::uint8_t* map(std::uint32_t addr, std::size_t len, bool& writable) const;
     std::uint8_t raw_read8(std::uint32_t addr) const;
@@ -167,9 +201,15 @@ private:
     std::uint32_t m_geo_read_addr = 0;
     std::uint32_t m_geoctl = 0;
 
-    // SHARC coprocessor mailbox (stubbed ready).
-    std::uint32_t m_coproctl = 0;
-    std::uint32_t m_coprocnt = 0;
+    // SHARC coprocessor mailbox and interpreter.
+    mutable std::uint32_t m_coproctl = 0;
+    mutable std::uint32_t m_coprocnt = 0;
+    mutable cpu::Sharc m_sharc;
+    std::vector<std::uint8_t> m_copro_data;
+    mutable bool m_copro_halted = false;
+    mutable bool m_copro_program_upload = false;
+    mutable std::uint64_t m_copro_phase = 0;
+    mutable std::string m_copro_fault;
 
     InputState m_inputs;
     std::uint32_t m_framenum = 0;

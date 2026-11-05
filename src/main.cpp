@@ -255,6 +255,7 @@ int main(int argc, char** argv) {
                 }
                 frame_cycles += static_cast<std::uint64_t>(used);
                 bus.tick(used);
+                bus.tick_copro(used);
                 cycles += static_cast<std::uint64_t>(used);
                 ++instructions;
                 if (bus.trace()) {
@@ -299,6 +300,7 @@ int main(int argc, char** argv) {
                 faulted = true;
                 break;
             }
+            bus.tick_copro(used);
             cycles += static_cast<std::uint64_t>(used);
             ++instructions;
         }
@@ -401,6 +403,11 @@ int main(int argc, char** argv) {
     std::printf("  Unmapped reads  : %" PRIu64 "\n", bus.unmapped_reads);
     std::printf("  Unmapped writes : %" PRIu64 "\n", bus.unmapped_writes);
     std::printf("  ROM writes      : %" PRIu64 "\n", bus.rom_writes);
+    std::printf("  Copro (SHARC)   : %" PRIu64 " insns, PC=0x%06X%s\n",
+                bus.copro_instructions(), bus.copro_pc(),
+                bus.copro_fault().empty() ? "" : " [FAULT]");
+    if (!bus.copro_fault().empty())
+        std::printf("  Copro fault     : %s\n", bus.copro_fault().c_str());
     std::printf("------------------------------------------------------------\n");
     if (faulted)
         std::printf("  doa.zip mapped and executed; CPU halted on an unimplemented opcode:\n    %s\n",
