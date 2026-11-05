@@ -131,3 +131,26 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   `SDL_VIDEODRIVER=dummy` opens a window.
 - Video is still essentially black (2 distinct colors: black bg + a white
   overlay) — tile/char/colorxlat/palette path is a separate, unfinished task.
+
+## DOA "Motion Initialize Err" root cause (2026-11-05, fixed)
+- **Root cause**: SAGE aliased i960 window `0x06000000` to `main_data[0]`.
+  MAME's `model2_base_mem` maps it to `main_data[0x1000000]` (the "extra data"
+  ROMs). DOA reads its animation tables from `0x06000000`, so the wrong offset
+  made the game abort with `Motion Initialize Err!! ERR ANIME = 0x00B0` and park
+  on the diagnostic screen forever (SHARC idle loop at `0x020123` was a red herring
+  — that is the correct wait-for-command spin; `0x20122` is a `DO ... UNTIL` loop).
+  Fixed in `Bus::map()`; the diagnostic error text disappeared immediately and the
+  game now reads `0x06000000` (34k+ reads) and renders its font/logo tiles.
+- **Second bug**: 317-0229 protection registers (`0x01d87ff0-0x01d87ffb`, status
+  `0x01d8400c`) overlay the tail of the protection source-RAM window
+  (`0x01d80000-0x01d87fff`). `read16/32` and `write16/32` must decode the register
+  block **before** the generic `map()` RAM fallback, else the registers are dead
+  code (reads return raw RAM). Matches MAME `model2_0229_mem` (specific handler wins).
+- DOA never actually polls the protection status during boot, so that fix alone did
+  not change the symptom — but it is still correct for MAME parity.
+- Remaining gap to visible gameplay: the 3D polygon rasteriser is not implemented
+  (only System 24 tile layers + direct framebuffer render), and the game still
+  does not issue SHARC commands (0 non-upload `fifo_w`) — copro command path is the
+  next milestone. Screen shows the game's own tile/logo output now, not the error.
+- Debug hooks added: `SAGE_SHARC_PC` (PM PC histogram), `SAGE_SHARC_DUMP=base:count`
+  (PM 48-bit words around PC), `SAGE_SHARC_EXT`, `SAGE_PROT_TRACE` (removed).
