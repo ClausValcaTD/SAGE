@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <functional>
+#include <map>
 #include <string>
 #include <utility>
 
@@ -107,6 +108,7 @@ public:
     std::uint32_t reg(int i) const { return std::uint32_t(m_core->r[i].r); }
     bool idle() const { return m_core->idle != 0; }
     std::uint64_t instructions() const { return m_instructions; }
+    void set_pc_hist(std::map<std::uint32_t, std::uint64_t>* h) { m_pc_hist = h; }
     std::uint32_t irq_pending() const { return std::uint32_t(m_core->irq_pending); }
     std::uint32_t dma_status() const { return m_core->dma_status; }
     std::uint32_t mode1() const { return m_core->mode1; }
@@ -400,6 +402,7 @@ private:
     OpFunc m_sharc_op[0x200];
 
     std::uint64_t m_instructions = 0;
+    std::map<std::uint32_t, std::uint64_t>* m_pc_hist = nullptr;
 
     ExtReadFn m_ext_read;
     ExtWriteFn m_ext_write;

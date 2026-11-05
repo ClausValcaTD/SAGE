@@ -74,6 +74,8 @@ public:
     bool copro_halted() const { return m_copro_halted; }
     std::uint64_t copro_instructions() const { return m_sharc.instructions(); }
     std::uint32_t copro_pc() const { return m_sharc.pc(); }
+    const cpu::Sharc& sharc() const { return m_sharc; }
+    cpu::Sharc& sharc_mutable() { return m_sharc; }
     const std::string& copro_fault() const { return m_copro_fault; }
 
     // ---- Video ------------------------------------------------------------
@@ -214,6 +216,7 @@ private:
     InputState m_inputs;
     std::uint32_t m_framenum = 0;
     std::uint64_t m_vblank_count = 0;
+    mutable std::uint64_t m_sharc_ext_log = 0;
     std::uint64_t m_timer_irq_count = 0;
     std::uint8_t m_ctrlmode = 0;
 

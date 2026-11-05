@@ -1,4 +1,5 @@
 build/
+build-*/
 references/
 roms/
 *.zip

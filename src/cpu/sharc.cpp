@@ -477,6 +477,7 @@ void Sharc::run_cycles(int cycles) {
             }
         }
 
+        if (m_pc_hist) ++(*m_pc_hist)[m_core->pc & 0x3ffff];
         (this->*m_sharc_op[(m_core->opcode >> 39) & 0x1ff])();
         m_instructions++;
 

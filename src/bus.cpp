@@ -129,6 +129,8 @@ void Bus::attach(const RomLoader& roms) {
     m_sharc.reset();
     m_sharc.set_external_port(
         [this](std::uint32_t addr, std::uint32_t& data) -> bool {
+            if (std::getenv("SAGE_SHARC_EXT") && m_sharc_ext_log++ < 80)
+                std::fprintf(stderr, "[sharc-ext] R pc=%06X addr=%08X\n", m_sharc.pc(), addr);
             if (addr >= 0x00400000 && addr < 0x00c00000) {  // copro FIFO in
                 data = m_fifo_in.pop();
                 copro_update_flags();
@@ -261,8 +263,11 @@ std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) cons
         if (const Region* md = m_roms->region("main_data")) {
             if (in_range(addr, len, kMainDataBase, md->data.size()))
                 return const_cast<std::uint8_t*>(md->data.data()) + (addr - kMainDataBase);
-            if (in_range(addr, len, kMainDataBase2, md->data.size()))
-                return const_cast<std::uint8_t*>(md->data.data()) + (addr - kMainDataBase2);
+            // MAME maps 0x06000000 to main_data[0x1000000] (the "extra data"
+            // ROMs), not to the start of the region.
+            if (addr >= kMainDataBase2 && addr - kMainDataBase2 + len <= md->data.size() - 0x1000000u)
+                return const_cast<std::uint8_t*>(md->data.data()) + 0x1000000u +
+                       (addr - kMainDataBase2);
         }
     }
 
@@ -473,12 +478,12 @@ std::uint8_t Bus::read8(std::uint32_t addr) const {
 
 std::uint16_t Bus::read16(std::uint32_t addr) const {
     watch_log('R', addr, 0);
-    bool w = false;
-    if (const std::uint8_t* p = map(addr, 2, w))
-        return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
 
-    // 317-0229 data port: two decompressed bytes, high byte first. The first
-    // halfword after a source write is discarded by Dead or Alive.
+    // 317-0229 registers overlay the tail of the protection source RAM window,
+    // so they must be decoded before the RAM fallback (matches MAME's
+    // model2_0229_mem, where the more specific handler wins).
+    // Data port: two decompressed bytes, high byte first. The first halfword
+    // after a source write is discarded by Dead or Alive.
     if (addr >= kProtBase + 0x7ff8 && addr < kProtBase + 0x7ffc) {
         if (m_doa_dummy) {
             m_doa_dummy = false;
@@ -492,16 +497,16 @@ std::uint16_t Bus::read16(std::uint32_t addr) const {
         return m_prot_a ? 0xffff : 0xfff0;
     }
 
+    bool w = false;
+    if (const std::uint8_t* p = map(addr, 2, w))
+        return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
+
     return static_cast<std::uint16_t>(read8(addr) | (read8(addr + 1) << 8));
 }
 
 std::uint32_t Bus::read32(std::uint32_t addr) const {
     watch_log('R', addr, 0);
     if (m_trace) ++m_read_hist[addr & 0xfffc0000];
-    bool w = false;
-    if (const std::uint8_t* p = map(addr, 4, w))
-        return static_cast<std::uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) |
-                                          (static_cast<std::uint32_t>(p[3]) << 24));
 
     if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000)
         return copro_fifo_r();
@@ -511,6 +516,15 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
         const std::uint32_t hi = read16(addr + 2);
         return lo | (hi << 16);
     }
+    if (addr >= 0x01d8400c && addr < 0x01d84010) {
+        m_prot_a = !m_prot_a;
+        return m_prot_a ? 0xffff : 0xfff0;
+    }
+
+    bool w = false;
+    if (const std::uint8_t* p = map(addr, 4, w))
+        return static_cast<std::uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) |
+                                          (static_cast<std::uint32_t>(p[3]) << 24));
 
     std::uint32_t v = 0;
     for (unsigned i = 0; i < 4; ++i)
@@ -543,6 +557,13 @@ void Bus::write8(std::uint32_t addr, std::uint8_t val) {
 
 void Bus::write16(std::uint32_t addr, std::uint16_t val) {
     watch_log('W', addr, val);
+
+    // Protection registers overlay the source RAM window; decode them first.
+    if (addr >= kProtBase + 0x7ff4 && addr < kProtBase + 0x7ff8) {
+        m_protection.table_w((addr - (kProtBase + 0x7ff4)) >> 1, val);
+        return;
+    }
+
     bool w = false;
     if (std::uint8_t* p = map(addr, 2, w)) {
         if (w) {
@@ -556,17 +577,26 @@ void Bus::write16(std::uint32_t addr, std::uint16_t val) {
         return;
     }
 
-    if (addr >= kProtBase + 0x7ff4 && addr < kProtBase + 0x7ff8) {
-        m_protection.table_w((addr - (kProtBase + 0x7ff4)) >> 1, val);
-        return;
-    }
-
     write8(addr, static_cast<std::uint8_t>(val));
     write8(addr + 1, static_cast<std::uint8_t>(val >> 8));
 }
 
 void Bus::write32(std::uint32_t addr, std::uint32_t val) {
     watch_log('W', addr, val);
+
+    // Protection registers overlay the source RAM window; decode them first.
+    if (addr >= kProtBase + 0x7ff0 && addr < kProtBase + 0x7ff4) {
+        m_prot_source = val;
+        m_protection.source_w(val);
+        m_doa_dummy = true;
+        return;
+    }
+    if (addr >= kProtBase + 0x7ff4 && addr < kProtBase + 0x7ff8) {
+        m_protection.table_w(0, static_cast<std::uint16_t>(val));
+        m_protection.table_w(1, static_cast<std::uint16_t>(val >> 16));
+        return;
+    }
+
     bool w = false;
     if (std::uint8_t* p = map(addr, 4, w)) {
         if (w) {

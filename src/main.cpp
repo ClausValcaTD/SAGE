@@ -193,6 +193,21 @@ int main(int argc, char** argv) {
     bus.set_cpu(&cpu);
     cpu.reset();
 
+    std::map<std::uint32_t, std::uint64_t> sharc_pc_hist;
+    if (std::getenv("SAGE_SHARC_PC"))
+        bus.sharc_mutable().set_pc_hist(&sharc_pc_hist);
+
+    if (const char* inj = std::getenv("SAGE_PRESS")) {
+        unsigned frame = 0, port = 0, val = 0;
+        std::sscanf(inj, "%u:%u:%x", &frame, &port, &val);
+        (void)frame;
+        if (port == 1)
+            bus.inputs().p1 = static_cast<std::uint8_t>(val);
+        else if (port == 2)
+            bus.inputs().p2 = static_cast<std::uint8_t>(val);
+        std::printf("Injected input port %u = %02X\n", port, val);
+    }
+
     print_boot_state(cpu);
 
     if (const char* range = std::getenv("SAGE_DISASM")) {
@@ -390,6 +405,35 @@ int main(int argc, char** argv) {
     if (const char* ppm = std::getenv("SAGE_PPM"))
         if (write_ppm(ppm, bus.video()))
             std::printf("Frame written to %s\n\n", ppm);
+
+    if (std::getenv("SAGE_SHARC_PC")) {
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> v;
+        v.reserve(sharc_pc_hist.size());
+        for (const auto& [pc, n] : sharc_pc_hist)
+            v.push_back({n, pc});
+        std::sort(v.begin(), v.end(), std::greater<>());
+        std::printf("SHARC hottest PCs (top 20 of %zu)\n", v.size());
+        for (std::size_t i = 0; i < v.size() && i < 20; ++i)
+            std::printf("  %06" PRIX32 " : %" PRIu64 "\n", v[i].second, v[i].first);
+        std::printf("\n");
+    }
+
+    if (const char* sd = std::getenv("SAGE_SHARC_DUMP")) {
+        unsigned base = 0, count = 32;
+        std::sscanf(sd, "%x:%u", &base, &count);
+        const std::uint32_t pc = bus.copro_pc();
+        const unsigned from = (base ? base : pc) - 8;
+        std::printf("SHARC PM dump around PC=0x%06X (mode1=%08X mode2=%08X dma=%08X irq=%08X idle=%d)\n",
+                    pc, bus.sharc().mode1(), bus.sharc().mode2(), bus.sharc().dma_status(),
+                    bus.sharc().irq_pending(), bus.sharc().idle() ? 1 : 0);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint32_t w = from + i;
+            const std::uint64_t op = bus.sharc().debug_pm48(w);
+            std::printf("  %s PM[%06X] = %012llX\n", w == pc ? "->" : "  ", w,
+                        (unsigned long long)op);
+        }
+        std::printf("\n");
+    }
 
     std::printf("Execution summary\n");
     std::printf("------------------------------------------------------------\n");

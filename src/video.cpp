@@ -17,10 +17,13 @@
 namespace sage {
 namespace {
 
-// System 24 tile generator geometry (see segas24_tile_device::char_layout):
-// 8x8 tiles, 4 planes interleaved as consecutive 16-bit words, 256 words/tile.
-constexpr int kTileWords = 8 * 32;
-constexpr int kTiles = 0x400;  // 512 KiB char RAM / 512 bytes per tile
+// System 24 tile generator geometry (segas24_tile_device::char_layout): 8x8
+// tiles, 4 planes, planeoffset {0,1,2,3}, xoffset STEP8(0,4), yoffset
+// STEP8(0,32), charincrement 8*32 = 256 bits (16 words) per tile. The decoded
+// bit for pixel (x,y) plane p is at `code*256 + p + y*32 + x*4`, read LSB-first
+// from the byte array; xormask 8 (see NATIVE_ENDIAN_VALUE_LE_BE) swaps the two
+// bytes of each 16-bit char word relative to the i960's big-endian store.
+constexpr int kTileBits = 8 * 32;
 constexpr int kTilemapDim = 64;  // 64x64 tiles
 
 // Palette / colour-translation layout (all byte offsets from 0x01800000).
@@ -136,60 +139,59 @@ void Video::rebuild_palette() {
     m_palette_dirty = false;
 }
 
-// Decodes one tile pixel: 8x8, 4 planes, plane p at word offset y*4 + p,
-// bit x.
+// Decodes one tile pixel: 8x8, 4 planes. Plane p of pixel (x,y) lives at bit
+// `code*256 + p + y*32 + x*4`, read LSB-first; bit order per MAME gfx_element.
 int tile_pixel(const std::vector<std::uint8_t>& chram, int code, int x, int y) {
-    const int base = (code % kTiles) * kTileWords;
+    const int base = (code & 0x3fff) * kTileBits;
     int pen = 0;
     for (int p = 0; p < 4; ++p) {
-        const int word = base + y * 4 + p;
-        const std::size_t off = static_cast<std::size_t>(word) * 2;
-        if (off + 1 >= chram.size())
+        const int b = base + p + y * 32 + x * 4;
+        const std::size_t off = static_cast<std::size_t>(b >> 3);
+        if (off >= chram.size())
             continue;
-        const std::uint16_t w = static_cast<std::uint16_t>(chram[off] | (chram[off + 1] << 8));
-        if (w & (1 << x))
+        if (chram[off] & (1 << (b & 7)))
             pen |= 1 << p;
     }
     return pen;
 }
 
 void Video::draw_tile_layers() {
-    // MAME screen_update() draws tilemaps 3 and 2 opaque, then 1 and 0
+    // MAME screen_update(): tilemaps 3 and 2 are drawn opaque, then 1 and 0
     // transparent. Tilemap L reads its map words at L*0x1000 and its scroll
-    // registers from tile_ram[0x5000+L] / [0x5004+L].
+    // registers from tile_ram[0x5000+L] / [0x5004+L] (word offsets).
     static constexpr int kOrder[4] = {3, 2, 1, 0};
     for (int idx = 0; idx < 4; ++idx) {
         const int layer = kOrder[idx];
         const bool opaque = layer >= 2;
 
-        const std::uint16_t vscr = rd16(m_tile, (0x5004 + layer) * 2);
-        if (vscr & 0x8000)  // layer disabled
+        const std::uint16_t vscr_reg = rd16(m_tile, (0x5004 + layer) * 2);
+        if (vscr_reg & 0x8000)  // layer disabled
             continue;
-        const std::uint16_t hscr = rd16(m_tile, (0x5000 + layer) * 2);
-        const int scrollx = hscr & 0x1ff;
-        const int scrolly = vscr & 0x1ff;
+        const std::uint16_t hscr_reg = rd16(m_tile, (0x5000 + layer) * 2);
+        const int hscr = (-static_cast<int>(hscr_reg)) & 0x1ff;
+        const int vscr = static_cast<int>(vscr_reg) & 0x1ff;
 
         for (int ty = 0; ty < kTilemapDim; ++ty) {
             for (int tx = 0; tx < kTilemapDim; ++tx) {
                 const std::uint16_t val =
                     rd16(m_tile, (static_cast<std::size_t>(layer) * 0x1000 +
                                   ty * kTilemapDim + tx) * 2);
-                const int code = val & 0x3ff;
+                const int code = val & 0x3fff;
                 const int color = (val >> 7) & 0xff;
 
                 for (int py = 0; py < 8; ++py) {
-                    const int sy = (ty * 8 + py + scrolly) & 0x1ff;
-                    if (sy < 0 || sy >= kHeight)
+                    const int my = (ty * 8 + py + vscr) & 0x1ff;
+                    if (my >= kHeight)
                         continue;
                     for (int px = 0; px < 8; ++px) {
-                        const int sx = (tx * 8 + px + scrollx) & 0x1ff;
-                        if (sx < 0 || sx >= kWidth)
+                        const int mx = (tx * 8 + px + hscr) & 0x1ff;
+                        if (mx >= kWidth)
                             continue;
                         const int pen = tile_pixel(m_char, code, px, py);
                         if (pen == 0 && !opaque)
                             continue;
-                        const int idx = ((color << 4) | pen) & 0x1fff;
-                        m_rgba[static_cast<std::size_t>(sy) * kWidth + sx] = m_palette[idx];
+                        const int index = ((color << 4) | pen) & 0xfff;
+                        m_rgba[static_cast<std::size_t>(my) * kWidth + mx] = m_palette[index];
                     }
                 }
             }
