@@ -3,8 +3,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <algorithm>
+#include <functional>
+#include <map>
+#include <utility>
+#include <set>
+#include <vector>
 
 #include "sage/bus.h"
+#include "sage/display.h"
 #include "sage/cpu/i960.h"
 #include "sage/rom_loader.h"
 
@@ -16,6 +23,10 @@ constexpr const char* kBanner =
     " \\___ \\ / _ \\| |  _|  _|  \n"
     "  ___) / ___ \\ |_| | |___ \n"
     " |____/_/   \\_\\____|_____|\n";
+
+// i960KB on the Model 2 CPU board runs from a 50 MHz crystal divided by two.
+constexpr std::uint32_t kCpuClock = 25'000'000;
+constexpr int kFrameRate = 60;
 
 void print_banner() {
     std::printf("%s", kBanner);
@@ -38,7 +49,8 @@ std::string human_size(std::size_t bytes) {
 void print_rom_table(const sage::LoadReport& rep) {
     std::printf("ROM IC verification\n");
     std::printf("------------------------------------------------------------\n");
-    std::printf("  %-18s %-18s %10s  %-8s  %s\n", "IC (MAME)", "IC (archive)", "Size", "CRC32", "Status");
+    std::printf("  %-18s %-18s %10s  %-8s  %s\n", "IC (MAME)", "IC (archive)", "Size", "CRC32",
+                "Status");
     std::printf("------------------------------------------------------------\n");
     std::size_t ok = 0, alt = 0;
     for (const auto& r : rep.roms) {
@@ -87,6 +99,43 @@ void print_boot_state(const sage::cpu::I960& cpu) {
     std::printf("------------------------------------------------------------\n\n");
 }
 
+void print_bus_state(const sage::Bus& bus, const sage::cpu::I960& cpu) {
+    std::printf("Peripheral state\n");
+    std::printf("------------------------------------------------------------\n");
+    std::printf("  Interrupt enable : 0x%08" PRIX32 "\n", bus.irq_enable());
+    std::printf("  Interrupt request: 0x%08" PRIX32 "\n", bus.irq_request());
+    std::printf("  Video control    : 0x%08" PRIX32 "\n", bus.video_control());
+    std::printf("  Render mode      : %s\n", bus.render_mode() ? "60 Hz" : "30 Hz");
+    std::printf("  VBLANKs raised   : %" PRIu64 "\n", bus.vblank_count());
+    std::printf("  Timer IRQs       : %" PRIu64 "\n", bus.timer_irq_count());
+    std::printf("  ICR (vectors)    : 0x%08" PRIX32 "\n", cpu.get_icr());
+    std::printf("  IRQ immediate    : %" PRIu64 "\n", cpu.irq_immediate_count());
+    std::printf("  IRQ pending      : %" PRIu64 "\n", cpu.irq_pending_count());
+    std::printf("  IRQ taken        : %" PRIu64 "\n", cpu.irq_taken_count());
+    std::printf("------------------------------------------------------------\n\n");
+}
+
+// Writes the current rendered frame as a binary PPM (P6) for inspection.
+bool write_ppm(const char* path, const sage::Video& video) {
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "P6\n%d %d\n255\n", sage::Video::kWidth, sage::Video::kHeight);
+    const std::uint32_t* px = video.rgba();
+    std::vector<std::uint8_t> row(static_cast<std::size_t>(sage::Video::kWidth) * 3);
+    for (int y = 0; y < sage::Video::kHeight; ++y) {
+        for (int x = 0; x < sage::Video::kWidth; ++x) {
+            const std::uint32_t c = px[y * sage::Video::kWidth + x];
+            row[x * 3 + 0] = static_cast<std::uint8_t>(c >> 16);
+            row[x * 3 + 1] = static_cast<std::uint8_t>(c >> 8);
+            row[x * 3 + 2] = static_cast<std::uint8_t>(c);
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -94,7 +143,8 @@ int main(int argc, char** argv) {
 
     const std::string zip_path = (argc > 1) ? argv[1] : "roms/doa.zip";
     const std::string game = (argc > 2) ? argv[2] : "doa";
-    const int max_instructions = (argc > 3) ? std::atoi(argv[3]) : 1000;
+    const long frames = (argc > 3) ? std::atol(argv[3]) : 0;
+    const long trace_instructions = std::getenv("SAGE_TRACE") ? 100'000 : 0;
 
     std::printf("Loading ROM set: %s\n\n", zip_path.c_str());
 
@@ -123,58 +173,230 @@ int main(int argc, char** argv) {
                 human_size(rep.program_bytes).c_str());
     std::printf("------------------------------------------------------------\n\n");
 
-    // ---- CPU bring-up -----------------------------------------------------
+    // ---- Machine bring-up -------------------------------------------------
     sage::Bus bus;
+    if (std::getenv("SAGE_TRACE"))
+        bus.set_trace(true);
+    if (std::getenv("SAGE_TRACE_IRQ"))
+        bus.set_trace_irq(true);
     bus.attach(loader);
 
+    if (const char* w = std::getenv("SAGE_WATCH")) {
+        unsigned lo = 0, hi = 0;
+        std::sscanf(w, "%x:%x", &lo, &hi);
+        bus.set_watch(lo, hi, 40, std::getenv("SAGE_WATCH_R") != nullptr);
+    }
+
     sage::cpu::I960 cpu(bus);
+    if (std::getenv("SAGE_TRACE_IRQ"))
+        cpu.set_trace_irq(true);
+    bus.set_cpu(&cpu);
     cpu.reset();
 
     print_boot_state(cpu);
 
-    std::printf("Execution trace (%d instructions)\n", max_instructions);
-    std::printf("------------------------------------------------------------\n");
+    if (const char* range = std::getenv("SAGE_DISASM")) {
+        unsigned start = 0, count = 64;
+        std::sscanf(range, "%x:%u", &start, &count);
+        std::printf("Disassembly at 0x%08X\n", start);
+        std::printf("------------------------------------------------------------\n");
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint32_t pc = start + i * 4;
+            std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  %s\n", pc, bus.read32(pc),
+                        cpu.disassemble(pc).c_str());
+        }
+        std::printf("------------------------------------------------------------\n\n");
+    }
 
     std::uint64_t cycles = 0;
-    int executed = 0;
+    std::uint64_t instructions = 0;
+    long frames_run = 0;
+    std::map<std::uint32_t, std::uint64_t> pc_pages;
+    std::vector<std::uint32_t> pc_order;
+    std::set<std::uint32_t> new_pc_seen;
     bool faulted = false;
     std::string fault_msg;
 
-    for (int i = 0; i < max_instructions; i++) {
-        const std::uint32_t pc = cpu.get_ip();
-        const std::uint32_t opcode = bus.read32(pc);
-
-        if (i < 20) {
-            const std::string text = cpu.disassemble(pc);
-            std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  %-26s (g0=%08" PRIX32 " r0=%08" PRIX32
-                        " ac=%08" PRIX32 ")\n",
-                        pc, opcode, text.c_str(), cpu.reg(16), cpu.reg(0), cpu.get_ac());
-        }
-
-        int used;
-        try {
-            used = cpu.step();
-        } catch (const sage::cpu::Fault& f) {
-            std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  FAULT: %s\n", pc, opcode, f.what());
-            fault_msg = f.what();
-            faulted = true;
-            break;
-        }
-
-        cycles += static_cast<std::uint64_t>(used);
-        executed++;
-
-        if ((i + 1) % 200 == 0)
-            std::printf("  -- checkpoint: %d instructions, %" PRIu64 " cycles, IP=0x%08" PRIX32 "\n",
-                        i + 1, cycles, cpu.get_ip());
+    sage::Display display;
+    const bool want_window = std::getenv("SAGE_HEADLESS") == nullptr;
+    if (frames > 0 && want_window) {
+        if (display.open("SAGE - Dead or Alive (Sega Model 2B)", sage::Video::kWidth,
+                         sage::Video::kHeight))
+            std::printf("SDL window opened (%dx%d). ESC or close to quit.\n\n",
+                        sage::Video::kWidth, sage::Video::kHeight);
+        else
+            std::printf("SDL window unavailable; continuing headless.\n\n");
     }
 
-    std::printf("------------------------------------------------------------\n\n");
+    if (frames > 0) {
+        const std::uint64_t cycles_per_frame = kCpuClock / kFrameRate;
+        std::printf("Execution: %ld frame%s at %d Hz (%" PRIu64 " cycles/frame)\n", frames,
+                    frames == 1 ? "" : "s", kFrameRate, cycles_per_frame);
+        std::printf("------------------------------------------------------------\n");
+
+        for (long frame = 0; frame < frames && !faulted; ++frame) {
+            if (display.is_open() && !display.pump()) {
+                std::printf("  window closed at frame %ld\n", frame);
+                break;
+            }
+            std::uint64_t frame_cycles = 0;
+            while (frame_cycles < cycles_per_frame) {
+                const std::uint32_t pc = cpu.get_ip();
+                const std::uint32_t opcode = bus.read32(pc);
+                int used = 0;
+                try {
+                    used = cpu.step();
+                } catch (const sage::cpu::Fault& f) {
+                    std::printf("  [frame %ld] [0x%08" PRIX32 "] %08" PRIX32 "  FAULT: %s\n", frame,
+                                pc, opcode, f.what());
+                    fault_msg = f.what();
+                    faulted = true;
+                    break;
+                }
+                frame_cycles += static_cast<std::uint64_t>(used);
+                bus.tick(used);
+                cycles += static_cast<std::uint64_t>(used);
+                ++instructions;
+                if (bus.trace()) {
+                    ++pc_pages[pc & 0x0000ffff];
+                    if (new_pc_seen.insert(pc).second)
+                        pc_order.push_back(pc);
+                }
+            }
+
+            bus.trigger_vblank();
+            bus.video().render();
+            if (display.is_open()) {
+                display.present(bus.video().rgba());
+                if (std::getenv("SAGE_REALTIME"))
+                    display.pace_frame();
+            }
+            ++frames_run;
+
+            if (frame % 250 == 0 || frame + 1 == frames) {
+                std::printf("  frame %5ld  cycles %10" PRIu64 "  IP 0x%08" PRIX32
+                            "  VBLANKs %" PRIu64 "\n",
+                            frame, cycles, cpu.get_ip(), bus.vblank_count());
+            }
+        }
+        std::printf("------------------------------------------------------------\n\n");
+    } else {
+        std::printf("Execution trace (%ld instructions)\n", trace_instructions);
+        std::printf("------------------------------------------------------------\n");
+        for (long i = 0; i < trace_instructions && !faulted; ++i) {
+            const std::uint32_t pc = cpu.get_ip();
+            const std::uint32_t opcode = bus.read32(pc);
+            if (i < 20)
+                std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  %s\n", pc, opcode,
+                            cpu.disassemble(pc).c_str());
+
+            int used = 0;
+            try {
+                used = cpu.step();
+            } catch (const sage::cpu::Fault& f) {
+                std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  FAULT: %s\n", pc, opcode, f.what());
+                fault_msg = f.what();
+                faulted = true;
+                break;
+            }
+            cycles += static_cast<std::uint64_t>(used);
+            ++instructions;
+        }
+        std::printf("------------------------------------------------------------\n\n");
+    }
+
+    if (std::getenv("SAGE_TRACE")) {
+        std::printf("Read histogram (page -> count)\n");
+        for (const auto& [page, n] : bus.read_histogram())
+            std::printf("  %08" PRIX32 " : %" PRIu64 "\n", page, n);
+        std::printf("Write histogram (page -> count)\n");
+        for (const auto& [page, n] : bus.write_histogram())
+            std::printf("  %08" PRIX32 " : %" PRIu64 "\n", page, n);
+        std::printf("ROM-write histogram (page -> count)\n");
+        for (const auto& [page, n] : bus.rom_write_histogram())
+            std::printf("  %08" PRIX32 " : %" PRIu64 "\n", page, n);
+        std::printf("Unmapped reads (addr <- pc)\n");
+        for (const auto& [a, pc] : bus.unmapped_read_log())
+            std::printf("  %08" PRIX32 " <- %08" PRIX32 "\n", a, pc);
+        std::printf("Unmapped-read histogram (page -> count)\n");
+        for (const auto& [page, n] : bus.unmapped_read_histogram())
+            std::printf("  %08" PRIX32 " : %" PRIu64 "\n", page, n);
+        std::printf("Hottest PCs (top 20 of %zu)\n", pc_pages.size());
+        {
+            std::vector<std::pair<std::uint64_t, std::uint32_t>> v;
+            v.reserve(pc_pages.size());
+            for (const auto& [pc, n] : pc_pages)
+                v.push_back({n, pc});
+            std::sort(v.begin(), v.end(), std::greater<>());
+            for (std::size_t i = 0; i < v.size() && i < 20; ++i)
+                std::printf("  %08" PRIX32 " : %" PRIu64 "\n", v[i].second, v[i].first);
+        }
+        if (const char* dp = std::getenv("SAGE_DUMPRAW")) {
+            auto dump = [&](const char* path, const std::uint8_t* d, std::size_t n) {
+                if (std::FILE* f = std::fopen(path, "wb")) { std::fwrite(d, 1, n, f); std::fclose(f); }
+            };
+            dump((std::string(dp) + ".char").c_str(), bus.video().charram().data(), bus.video().charram().size());
+            dump((std::string(dp) + ".tile").c_str(), bus.video().tileram().data(), bus.video().tileram().size());
+            std::printf("dumped char+tile RAM to %s.{char,tile}\n", dp);
+        }
+        if (std::getenv("SAGE_DUMPVID")) {
+            const auto& cx = bus.video().colorxlat();
+            std::size_t nz = 0;
+            for (std::uint8_t b : cx)
+                if (b) ++nz;
+            std::printf("colorxlat nonzero bytes: %zu / %zu\n", nz, cx.size());
+            std::printf("  [0x0080]=%u [0x0280]=%u [0x4080]=%u [0x8080]=%u\n", cx[0x80], cx[0x280],
+                        cx[0x4080], cx[0x8080]);
+            const auto& pr = bus.video().palram();
+            std::size_t pnz = 0;
+            for (std::uint8_t b : pr)
+                if (b) ++pnz;
+            std::printf("palram nonzero bytes: %zu / %zu\n", pnz, pr.size());
+            const auto& pal = bus.video().palette();
+            std::set<std::uint32_t> uniq;
+            for (std::uint32_t c : pal) uniq.insert(c);
+            std::printf("palette distinct entries: %zu\n", uniq.size());
+            std::printf("  distinct:");
+            for (std::uint32_t c : uniq) std::printf(" %06X", c & 0xffffff);
+            std::printf("\n");
+        }
+        if (std::getenv("SAGE_PCORDER")) {
+            std::printf("Last discovered PCs (%zu total)\n", pc_order.size());
+            const std::size_t from = pc_order.size() > 60 ? pc_order.size() - 60 : 0;
+            for (std::size_t i = from; i < pc_order.size(); ++i)
+                std::printf("  %08" PRIX32 "\n", pc_order[i]);
+        }
+        std::printf("Unmapped-write histogram (page -> count)\n");
+        for (const auto& [page, n] : bus.unmapped_write_histogram())
+            std::printf("  %08" PRIX32 " : %" PRIu64 "\n", page, n);
+        std::printf("\n");
+    }
+
+    print_bus_state(bus, cpu);
+
+    if (std::getenv("SAGE_INTTAB")) {
+        const std::uint32_t prcb = cpu.get_prcb();
+        const std::uint32_t int_tab = bus.read32(prcb + 20);
+        std::printf("PRCB=0x%08X int_tab=0x%08X cpu_pri=%u PC=0x%08X\n", prcb, int_tab,
+                    (cpu.get_pc() >> 16) & 0x1f, cpu.get_pc());
+        std::printf("  pending priorities: %08X\n", bus.read32(int_tab));
+        for (int v = 8; v < 16; ++v)
+            std::printf("  vector %02X -> %08X\n", v, bus.read32(int_tab + 36 + (v - 8) * 4));
+        std::printf("\n");
+    }
+
+    if (const char* ppm = std::getenv("SAGE_PPM"))
+        if (write_ppm(ppm, bus.video()))
+            std::printf("Frame written to %s\n\n", ppm);
 
     std::printf("Execution summary\n");
     std::printf("------------------------------------------------------------\n");
-    std::printf("  Instructions    : %d\n", executed);
+    std::printf("  Instructions    : %" PRIu64 "\n", instructions);
     std::printf("  Cycles          : %" PRIu64 "\n", cycles);
+    std::printf("  Emulated time   : %.3f s\n",
+                static_cast<double>(cycles) / static_cast<double>(kCpuClock));
+    if (frames > 0)
+        std::printf("  Frames          : %ld\n", frames_run);
     std::printf("  Final IP        : 0x%08" PRIX32 "\n", cpu.get_ip());
     std::printf("  Unmapped reads  : %" PRIu64 "\n", bus.unmapped_reads);
     std::printf("  Unmapped writes : %" PRIu64 "\n", bus.unmapped_writes);

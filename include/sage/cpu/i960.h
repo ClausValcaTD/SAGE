@@ -63,6 +63,10 @@ public:
     std::uint32_t get_sat() const { return m_SAT; }
     std::uint32_t get_prcb() const { return m_PRCB; }
     std::uint32_t get_icr() const { return m_ICR; }
+    std::uint64_t irq_immediate_count() const { return m_irq_immediate_count; }
+    std::uint64_t irq_pending_count() const { return m_irq_pending_count; }
+    std::uint64_t irq_taken_count() const { return m_irq_taken_count; }
+    void set_trace_irq(bool on) { m_trace_irq = on; }
     std::uint32_t reg(int i) const { return m_r[i]; }
 
     // Interrupt line state (0..3); kept for parity with the MAME core.
@@ -146,6 +150,11 @@ private:
     int m_immediate_pri = 0;
 
     std::int8_t m_irq_line_state[4]{};
+
+    bool m_trace_irq = false;
+    std::uint64_t m_irq_immediate_count = 0;
+    std::uint64_t m_irq_pending_count = 0;
+    std::uint64_t m_irq_taken_count = 0;
 
     int m_icount = 0;
 };

@@ -8,6 +8,8 @@
 
 #include "sage/cpu/i960.h"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -453,12 +455,16 @@ double I960::round_to_int(double val) {
 // ---------------------------------------------------------------------------
 
 void I960::take_interrupt(int vector, int lvl) {
+    ++m_irq_taken_count;
     const int int_tab = m_bus.read32(m_PRCB + 20);  // interrupt table
     const int int_SP = m_bus.read32(m_PRCB + 24);   // interrupt stack
     int SP;
     std::uint32_t IRQV;
 
     IRQV = m_bus.read32(int_tab + 36 + (vector - 8) * 4);
+    if (m_irq_taken_count <= 5 && m_trace_irq)
+        std::fprintf(stderr, "[irq-take] vector=%d lvl=%d int_tab=%08X IRQV=%08X\n", vector, lvl,
+                     int_tab, IRQV);
 
     if (!(m_PC & 0x2000))  // if this is a nested interrupt, don't re-get int_SP
         SP = int_SP;
@@ -2034,8 +2040,10 @@ void I960::set_input(int irqline, int state) {
             m_immediate_irq = 1;
             m_immediate_vector = vector;
             m_immediate_pri = priority;
+            ++m_irq_immediate_count;
         } else {
             // store the interrupt in the "pending" table
+            ++m_irq_pending_count;
             pend = m_bus.read32(int_tab);
             pend |= (1 << priority);
             m_bus.write32(int_tab, pend);
