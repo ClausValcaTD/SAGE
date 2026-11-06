@@ -141,19 +141,32 @@ private:
     void copro_update_flags() const;
     void copro_boot();
     void copro_halt();
+    // MAME's generic_fifo synchronizes the two CPUs: a pop on an empty output
+    // FIFO stalls the i960 until the SHARC runs ahead, and a push into a full
+    // input FIFO halts it until the SHARC drains. Without this the i960 races
+    // arbitrarily far ahead and consumes uninitialised results.
+    void copro_fifo_sync(bool need_out) const;
 
     // Board-side coprocessor FIFOs (MAME generic_fifo_u32_device).
     struct CoproFifo {
         std::size_t cap = 16;
         std::deque<std::uint32_t> q;
+        std::deque<unsigned> serials;
+        unsigned next_serial = 1;
         bool empty() const { return q.empty(); }
         bool full() const { return q.size() >= cap; }
-        void clear() { q.clear(); }
-        void push(std::uint32_t v) { q.push_back(v); }
+        void clear() { q.clear(); serials.clear(); }
+        unsigned push(std::uint32_t v) {
+            const unsigned s = next_serial++;
+            q.push_back(v);
+            serials.push_back(s);
+            return s;
+        }
         std::uint32_t pop() {
             if (q.empty()) return 0;
             const std::uint32_t v = q.front();
             q.pop_front();
+            if (!serials.empty()) serials.pop_front();
             return v;
         }
     };
@@ -212,6 +225,7 @@ private:
     mutable bool m_copro_program_upload = false;
     mutable std::uint64_t m_copro_phase = 0;
     mutable std::string m_copro_fault;
+    mutable bool m_copro_in_sync = false;
 
     InputState m_inputs;
     std::uint32_t m_framenum = 0;

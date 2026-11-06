@@ -121,9 +121,11 @@ bool Sharc::pm_route(std::uint32_t word, int& block, std::uint32_t& moff) {
         moff = off;
         return true;
     }
-    if (off >= 0x18000 && off <= 0x1cfff) {  // mirrored block 1
+    // Block 1 repeats across the 0x8000/0x10000 address bits (MAME pgm_2m
+    // mirror(0x18000)), so it answers at 0x28000, 0x30000 and 0x38000.
+    if (off >= 0x8000 && off <= 0x1cfff && (off & 0x7fff) <= 0x4fff) {
         block = 1;
-        moff = off - 0x18000;
+        moff = off & 0x7fff;
         return true;
     }
     return false;
@@ -131,9 +133,14 @@ bool Sharc::pm_route(std::uint32_t word, int& block, std::uint32_t& moff) {
 
 bool Sharc::dm_route(std::uint32_t word, int& block, std::uint32_t& cell) {
     const std::uint32_t a = word & 0x7ffffu;
-    if (a >= 0x20000 && a <= 0x27fff) {
+    if (a >= 0x20000 && a <= 0x27fff) {  // block 0, normal-word view
         block = 0;
         cell = a - 0x20000;
+        return true;
+    }
+    if (a >= 0x28000 && a <= 0x3ffff) {  // block 1 normal-word view (mirror(0x18000))
+        block = 1;
+        cell = a & 0x7fff;
         return true;
     }
     if (a >= 0x40000 && a <= 0x4ffff) {  // block 0, halfword view
@@ -205,13 +212,17 @@ std::uint32_t Sharc::dm_read32(std::uint32_t word) const {
     if (word >= 0x400000u && m_ext_read) {
         std::uint32_t v = kUnmapped;
         if (m_ext_read(word, v)) return v;
+        if (m_unmapped_dbg) std::fprintf(stderr, "[unmap-ext] pc=%06X dm=%08X\n", m_core->pc, word);
         return kUnmapped;
     }
     const std::uint32_t a = word & 0x7ffffu;
     if (a < 0x100) return iop_r(a);
     int block;
     std::uint32_t cell;
-    if (!dm_route(a, block, cell)) return kUnmapped;
+    if (!dm_route(a, block, cell)) {
+        if (m_unmapped_dbg) std::fprintf(stderr, "[unmap-r] pc=%06X dm=%08X\n", m_core->pc, word);
+        return kUnmapped;
+    }
     // The 0x40000+ aperture is a 16-bit-wide view: a 32-bit access yields the
     // halfword at that offset, sign-extended when MODE1_SSE is selected.
     if (a >= 0x40000) {
@@ -239,6 +250,8 @@ void Sharc::dm_write32(std::uint32_t word, std::uint32_t data) {
         dm_short_w(a - (b ? 0x50000 : 0x40000), b, data & 0xffff);
         return;
     }
+    if (m_dm_dbg && (a >= 0x28000 || (a >= 0x20000 && a <= 0x20100)))
+        std::fprintf(stderr, "[dmw] pc=%06X a=%06X blk=%d cell=%04X v=%08X\n", m_core->pc, a, block, cell, data);
     m_block[block][cell] = data;
 }
 
@@ -361,6 +374,9 @@ void Sharc::external_dma_write(std::uint32_t address, std::uint64_t data) {
 // ---- PC / flow -------------------------------------------------------------
 
 void Sharc::CHANGE_PC(std::uint32_t newpc) {
+    if (m_badpc_trace && newpc > 0x3ffffu)
+        std::fprintf(stderr, "[badpc] CHANGE_PC from pc=%06X op=%012llX -> %08X\n",
+                     m_core->pc, (unsigned long long)m_core->opcode, newpc);
     m_core->pc = newpc;
     m_core->daddr = newpc;
     m_core->faddr = newpc + 1;
@@ -368,6 +384,9 @@ void Sharc::CHANGE_PC(std::uint32_t newpc) {
 }
 
 void Sharc::CHANGE_PC_DELAYED(std::uint32_t newpc) {
+    if (m_badpc_trace && (newpc > 0x3ffffu || newpc < 0x20000u))
+        std::fprintf(stderr, "[badpc] CHANGE_PC_DELAYED from pc=%06X op=%012llX -> %08X\n",
+                     m_core->pc, (unsigned long long)m_core->opcode, newpc);
     m_core->nfaddr = newpc;
     m_core->delay_slot1 = m_core->pc;
     m_core->delay_slot2 = m_core->daddr;
@@ -450,11 +469,95 @@ void Sharc::run_cycles(int cycles) {
 
         m_core->opcode = pm_read48(m_core->pc);
 
+        if (m_ring) {
+            m_ring[m_ring_pos & 1023] = m_core->pc;
+            m_ring_op[m_ring_pos & 1023] = m_core->opcode;
+            m_ring_d[m_ring_pos & 1023] = m_core->daddr;
+            m_ring_f[m_ring_pos & 1023] = m_core->faddr;
+            m_ring_nf[m_ring_pos & 1023] = m_core->nfaddr;
+            ++m_ring_pos;
+            if ((m_core->pc > 0x3ffffu || m_core->pc < 0x20000u) && !m_ring_dumped) {
+                m_ring_dumped = true;
+                std::fprintf(stderr, "[ring] divergence at pc=%06X, last 200 fetches:\n", m_core->pc);
+                for (unsigned k = 824; k < 1024; ++k) {
+                    unsigned idx = (m_ring_pos - 1024 + k) & 1023;
+                    std::fprintf(stderr, "  [ring] %06X op=%012llX d=%06X f=%06X nf=%06X\n", m_ring[idx],
+                                 (unsigned long long)m_ring_op[idx], m_ring_d[idx], m_ring_f[idx],
+                                 m_ring_nf[idx]);
+                }
+            }
+        }
+
+        if (m_cmd_trig && m_cmd_started && m_core->pc >= 0x20124u && m_core->pc <= 0x20132u)
+            std::fprintf(stderr, "[reg] pc=%06X op=%012llX r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X i2=%06X m7=%08X d2i7=%06X\n",
+                         m_core->pc, (unsigned long long)m_core->opcode, m_core->r[0].r, m_core->r[1].r,
+                         m_core->r[2].r, m_core->r[3].r, m_core->r[4].r, m_core->r[5].r,
+                         m_core->dag1.i[2], m_core->dag1.m[7], m_core->dag2.i[7]);
+        if (m_cmd_trig && m_core->pc == 0x20132u) {
+            const std::uint32_t tgt = m_core->dag2.i[7] + m_core->dag2.m[0];
+            std::fprintf(stderr, "[dispatch] d2i7=%06X d2m0=%06X target=%08X r0=%08X%s\n",
+                         m_core->dag2.i[7], m_core->dag2.m[0], tgt, m_core->r[0].r,
+                         (tgt < 0x20000u || tgt > 0x3ffffu) ? "  <-- INVALID" : "");
+        }
+        if (m_cmd_trig && !m_cmd_started && m_core->pc == 0x20117u && m_core->flag[0] == 0) {
+            m_cmd_started = true;
+            m_cmd_left = 120;
+            std::fprintf(stderr, "[cmd] === first command: flag0 cleared at pc=020117 ===\n");
+        }
+        if (m_cmd_trig && m_cmd_started && m_cmd_left > 0 && m_core->pc != 0x20117u) {
+            --m_cmd_left;
+            std::fprintf(stderr, "[cmd] pc=%06X op=%012llX d1i=%08X d1m=%08X d2i=%08X d2m=%08X r3=%08X\n",
+                         m_core->pc, (unsigned long long)m_core->opcode, m_core->dag1.i[2],
+                         m_core->dag1.m[7], m_core->dag2.i[7], m_core->dag2.m[0], m_core->r[3].r);
+        }
+        if (m_win_lo && m_core->pc >= m_win_lo && m_core->pc <= m_win_hi && m_core->pc != 0x20123u) {
+            std::fprintf(stderr,
+                         "[win] pc=%06X op=%012llX d=%06X f=%06X nf=%06X pcstk=%06X pcstkp=%u "
+                         "flg=%u%u\n",
+                         m_core->pc, (unsigned long long)m_core->opcode, m_core->daddr, m_core->faddr,
+                         m_core->nfaddr, m_core->pcstk, m_core->pcstkp, m_core->flag[0],
+                         m_core->flag[1]);
+            std::fprintf(stderr, "[win]   d1i=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+                         m_core->dag1.i[0], m_core->dag1.i[1], m_core->dag1.i[2], m_core->dag1.i[3],
+                         m_core->dag1.i[4], m_core->dag1.i[5], m_core->dag1.i[6], m_core->dag1.i[7]);
+            std::fprintf(stderr, "[win]   d1m=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+                         m_core->dag1.m[0], m_core->dag1.m[1], m_core->dag1.m[2], m_core->dag1.m[3],
+                         m_core->dag1.m[4], m_core->dag1.m[5], m_core->dag1.m[6], m_core->dag1.m[7]);
+            std::fprintf(stderr, "[win]   d2i=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+                         m_core->dag2.i[0], m_core->dag2.i[1], m_core->dag2.i[2], m_core->dag2.i[3],
+                         m_core->dag2.i[4], m_core->dag2.i[5], m_core->dag2.i[6], m_core->dag2.i[7]);
+            std::fprintf(stderr, "[win]   d2m=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+                         m_core->dag2.m[0], m_core->dag2.m[1], m_core->dag2.m[2], m_core->dag2.m[3],
+                         m_core->dag2.m[4], m_core->dag2.m[5], m_core->dag2.m[6], m_core->dag2.m[7]);
+        }
+
+        if (m_trace_count > 0) {
+            --m_trace_count;
+            std::fprintf(stderr,
+                         "[sh] pc=%06X op=%012llX idle=%d irqp=%X imask=%X mode1=%X flg=%u%u%u%u "
+                         "lcntr=%X lstkp=%u pcstkp=%u laddr=%06X lt=%u\n",
+                         m_core->pc, (unsigned long long)m_core->opcode, m_core->idle,
+                         m_core->irq_pending, m_core->imask, m_core->mode1, m_core->flag[0],
+                         m_core->flag[1], m_core->flag[2], m_core->flag[3], m_core->lcntr,
+                         m_core->lstkp, m_core->pcstkp, m_core->laddr.addr, m_core->laddr.loop_type);
+        }
+
         // Looping
         if (!(m_core->stky & LSEM) && (m_core->pc == m_core->laddr.addr)) {
+            if (m_loop_dbg && (m_core->pc >= 0x20120u && m_core->pc <= 0x20140u))
+                std::fprintf(stderr,
+                             "[loopfire] pc=%06X type=%u code=%02X cond=%d top=%06X lstkp=%u\n",
+                             m_core->pc, m_core->laddr.loop_type, m_core->laddr.code,
+                             DO_CONDITION_CODE(m_core->laddr.code), TOP_PC(), m_core->lstkp);
             switch (m_core->laddr.loop_type) {
                 case 0:  // arithmetic condition-based
                     if ((m_core->pc - TOP_PC()) > 2) m_core->astat = m_core->astat_old_old_old;
+                    if (m_wait_dbg && m_core->pc == 0x20123u && (m_wait_dbg < 0 || true)) {
+                        std::fprintf(stderr, "[loop] pc=%06X code=%X cond=%d flag0=%u lc=%X lstkp=%u\n",
+                                     m_core->pc, m_core->laddr.code, DO_CONDITION_CODE(m_core->laddr.code),
+                                     m_core->flag[0], m_core->curlcntr, m_core->lstkp);
+                        if (m_wait_dbg > 0) --m_wait_dbg;
+                    }
                     if (DO_CONDITION_CODE(m_core->laddr.code)) {
                         POP_LOOP();
                         POP_PC();
@@ -477,7 +580,7 @@ void Sharc::run_cycles(int cycles) {
             }
         }
 
-        if (m_pc_hist) ++(*m_pc_hist)[m_core->pc & 0x3ffff];
+        if (m_pc_hist) ++(*m_pc_hist)[m_core->pc];
         (this->*m_sharc_op[(m_core->opcode >> 39) & 0x1ff])();
         m_instructions++;
 

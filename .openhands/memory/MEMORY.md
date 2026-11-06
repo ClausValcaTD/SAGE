@@ -191,3 +191,33 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - `m_xoffs=90 / m_yoffs=-8` renderer defaults and `crtc_xoffset`/`crtc_yoffset` from
   `0x01040000`/`0x01060000` are correct; `poly.viewport[]` parsed from window data
   (0x0003) is correct (`vpraw=[8,90,504,474]`).
+
+## T2 root cause + fix: i960/SHARC FIFO flow control (2026-11-05)
+- **Symptom**: i960 raced ~100k words ahead of the SHARC; SHARC PC diverged to
+  `0x817FCFF1` (bogus dispatch from empty-FIFO garbage), then a hard hang/timeout
+  around frame 545 (600 frames never finished).
+- **Cause**: SAGE's copro FIFOs were unbounded deques returning 0 on empty reads.
+  MAME's `generic_fifo_u32_device` instead *couples the two CPUs*:
+  - output FIFO: `pop()` on empty → `m_on_fifo_empty_pre_sync` = `i960_stall()`
+    (stalls the i960 for one instruction, retried next timeslice);
+  - input FIFO (cap 16): `push()` when full → `m_on_fifo_full_post_sync` =
+    `set_input_line(HALT, ASSERT)` on the i960.
+  Model2B `machine_start()` (`references/model2.cpp` ~line 241) wires exactly this
+  with `setup(16, ...)` for both FIFOs.
+- **Fix** (`src/bus.cpp`): `copro_fifo_sync(bool need_out)` runs the SHARC forward
+  (64-cycle slices, 4000-iter cap) until the threshold is satisfied. Called from
+  `copro_fifo_r` (empty out), `copro_fifo_w` (full in) and `copro_function_port_w`.
+  Key detail: **early-out when `need_out && fifo_in.empty() && sharc.pc()` is
+  unchanged** — the SHARC is parked on an input command that has not been pushed,
+  so spinning can never produce output. Without this the loop burned the full
+  4000 iterations and the run took 10+ min for 600 frames.
+- **Verified**: SHARC idles correctly at `PC=0x020123` (its real wait loop), 0
+  invalid dispatches, 0 empty-FIFO output reads, 1800 frames (30 s emulated) clean.
+- Remaining (separate issue, NOT flow control): the i960 parks in its delay loop
+  at `0x27E0`/`0x27E8` (`ld 0x54b150,g4; cmpibne`) after ~frame 150. `0x54b150` is
+  written by `0x7838` and `0x27FC`, so it is being serviced; 3D stays black because
+  `geoctl` is never cleared (GEO never booted) — see TASK 6 note above.
+- Debug env gates used while chasing this (kept in tree): `SAGE_SHARC_TRACE`,
+  `SAGE_WAITDBG`, `SAGE_SHARC_RING`, `SAGE_SHARC_WIN`, `SAGE_SHARC_BADPC`,
+  `SAGE_SHARC_LOOPDBG`, `SAGE_SHARC_CMD`, `SAGE_SHARC_DM`, `SAGE_SHARC_UNMAP`,
+  `SAGE_DISASM=<hex[:n],...>` (prints live disassembly at boot).

@@ -198,6 +198,41 @@ int main(int argc, char** argv) {
     std::map<std::uint32_t, std::uint64_t> sharc_pc_hist;
     if (std::getenv("SAGE_SHARC_PC"))
         bus.sharc_mutable().set_pc_hist(&sharc_pc_hist);
+    if (const char* st = std::getenv("SAGE_SHARC_TRACE"))
+        bus.sharc_mutable().m_trace_count = std::atol(st);
+    if (const char* wd = std::getenv("SAGE_WAITDBG"))
+        bus.sharc_mutable().m_wait_dbg = std::atol(wd);
+    static std::uint32_t sharc_ring[1024];
+    static std::uint64_t sharc_ring_op[1024];
+    static std::uint32_t sharc_ring_d[1024], sharc_ring_f[1024], sharc_ring_nf[1024];
+    if (std::getenv("SAGE_SHARC_RING"))
+        bus.sharc_mutable().set_ring(sharc_ring, sharc_ring_op, sharc_ring_d, sharc_ring_f,
+                                     sharc_ring_nf);
+    if (const char* w = std::getenv("SAGE_SHARC_WIN")) {
+        unsigned lo = 0, hi = 0;
+        std::sscanf(w, "%x:%x", &lo, &hi);
+        bus.sharc_mutable().set_window(lo, hi);
+    }
+    if (std::getenv("SAGE_SHARC_BADPC"))
+        bus.sharc_mutable().m_badpc_trace = true;
+    if (std::getenv("SAGE_SHARC_LOOPDBG"))
+        bus.sharc_mutable().m_loop_dbg = true;
+    if (std::getenv("SAGE_SHARC_CMD"))
+        bus.sharc_mutable().m_cmd_trig = true;
+    if (std::getenv("SAGE_SHARC_DM"))
+        bus.sharc_mutable().m_dm_dbg = true;
+    if (std::getenv("SAGE_SHARC_UNMAP"))
+        bus.sharc_mutable().m_unmapped_dbg = true;
+
+    if (const char* dp = std::getenv("SAGE_DISASM")) {
+        char buf[4096];
+        std::snprintf(buf, sizeof(buf), "%s", dp);
+        for (char* tok = std::strtok(buf, ","); tok; tok = std::strtok(nullptr, ",")) {
+            std::uint32_t a = static_cast<std::uint32_t>(std::strtoul(tok, nullptr, 16));
+            std::printf("  [0x%08" PRIX32 "] %08" PRIX32 "  %s\n", a, bus.read32(a),
+                        cpu.disassemble(a).c_str());
+        }
+    }
 
     if (const char* inj = std::getenv("SAGE_PRESS")) {
         unsigned frame = 0, port = 0, val = 0;

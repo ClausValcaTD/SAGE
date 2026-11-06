@@ -136,7 +136,11 @@ void Bus::attach(const RomLoader& roms) {
             if (std::getenv("SAGE_SHARC_EXT") && m_sharc_ext_log++ < 80)
                 std::fprintf(stderr, "[sharc-ext] R pc=%06X addr=%08X\n", m_sharc.pc(), addr);
             if (addr >= 0x00400000 && addr < 0x00c00000) {  // copro FIFO in
+                const unsigned ser = m_fifo_in.serials.empty() ? 0 : m_fifo_in.serials.front();
                 data = m_fifo_in.pop();
+                if (std::getenv("SAGE_SHARC_FIFO"))
+                    std::fprintf(stderr, "[fifo] R pc=%06X ser=%u -> %08X (in.q=%zu)\n",
+                                 m_sharc.pc(), ser, data, m_fifo_in.q.size());
                 copro_update_flags();
                 return true;
             }
@@ -172,6 +176,9 @@ void Bus::attach(const RomLoader& roms) {
         [this](std::uint32_t addr, std::uint32_t data) {
             if (addr >= 0x00c00000 && addr < 0x01400000) {  // copro FIFO out
                 m_fifo_out.push(data);
+                if (std::getenv("SAGE_SHARC_FIFOOUT"))
+                    std::fprintf(stderr, "[fifoout] W pc=%06X v=%08X (out.q=%zu)\n",
+                                 m_sharc.pc(), data, m_fifo_out.q.size());
                 copro_update_flags();
                 return;
             }
@@ -779,10 +786,41 @@ void Bus::trigger_vblank() {
 
 // ---- SHARC coprocessor -----------------------------------------------------
 
+void Bus::copro_fifo_sync(bool need_out) const {
+    // Mirror MAME's generic_fifo cross-CPU synchronization: a pop on an empty
+    // output FIFO stalls the i960 until the SHARC has produced a value, and a
+    // push into a full input FIFO halts it until the SHARC has drained one.
+    // Without this the i960 races arbitrarily far ahead and consumes results
+    // that were never written.
+    if (m_copro_halted || !m_copro_fault.empty() || m_copro_in_sync) return;
+    m_copro_in_sync = true;
+    std::uint32_t last_pc = m_sharc.pc();
+    for (int i = 0; i < 4000; ++i) {
+        if (need_out ? !m_fifo_out.empty() : !m_fifo_in.full()) break;
+        if (m_copro_halted || !m_copro_fault.empty()) break;
+        try {
+            m_sharc.run_cycles(64);
+        } catch (const std::exception& e) {
+            m_copro_fault = e.what();
+            m_copro_halted = true;
+            break;
+        }
+        // The SHARC is parked with an empty input FIFO: no amount of further
+        // execution can produce the output value, so stop rather than spin.
+        if (need_out && m_fifo_in.empty() && m_sharc.pc() == last_pc) break;
+        last_pc = m_sharc.pc();
+    }
+    m_copro_in_sync = false;
+}
+
 void Bus::copro_update_flags() const {
     // FLAG0 mirrors the input FIFO empty state, FLAG1 the output FIFO full state.
     m_sharc.set_flag_input(0, m_fifo_in.empty());
     m_sharc.set_flag_input(1, m_fifo_out.full());
+    if (std::getenv("SAGE_FIFODBG"))
+        std::fprintf(stderr, "[fifo] in=%zu out=%zu flag0=%d flag1=%d shpc=%06X\n",
+                     m_fifo_in.q.size(), m_fifo_out.q.size(), m_sharc.flag_input(0),
+                     m_sharc.flag_input(1), m_sharc.pc());
 }
 
 void Bus::copro_halt() {
@@ -829,13 +867,22 @@ void Bus::copro_fifo_w(std::uint32_t data) {
         m_sharc.external_dma_write(m_coprocnt, data & 0xffff);
         ++m_coprocnt;
     } else {
-        m_fifo_in.push(data);
+        if (m_fifo_in.full()) copro_fifo_sync(false);
+        const unsigned ser = m_fifo_in.push(data);
+        if (std::getenv("SAGE_SHARC_PUSH"))
+            std::fprintf(stderr, "[push-fifo] ser=%u pc=%08X v=%08X (q=%zu)\n",
+                         ser, m_cpu ? m_cpu->get_ip() : 0, data, m_fifo_in.q.size());
         copro_update_flags();
     }
 }
 
 std::uint32_t Bus::copro_fifo_r() const {
+    if (m_fifo_out.empty()) copro_fifo_sync(true);
+    const bool was_empty = m_fifo_out.empty();
     const std::uint32_t v = m_fifo_out.pop();
+    if (std::getenv("SAGE_SHARC_FIFOOUT"))
+        std::fprintf(stderr, "[fifoout] R pc=%08X -> %08X (was_empty=%d out.q=%zu)\n",
+                     m_cpu ? m_cpu->get_ip() : 0, v, was_empty ? 1 : 0, m_fifo_out.q.size());
     if (std::getenv("SAGE_COPRO_TRACE"))
         std::fprintf(stderr, "[copro] fifo_r %08X pc=%08X\n", v, m_cpu ? m_cpu->get_ip() : 0);
     copro_update_flags();
@@ -847,7 +894,11 @@ void Bus::copro_function_port_w(std::uint32_t byte_offset, std::uint32_t data) {
     // the 8-bit function selector.
     const std::uint32_t a = ((byte_offset >> 2) >> 2) & 0xff;
     const std::uint32_t d = (data & 0x800fffff) | (a << 23);
-    m_fifo_in.push(d);
+    if (m_fifo_in.full()) copro_fifo_sync(false);
+    const unsigned ser = m_fifo_in.push(d);
+    if (std::getenv("SAGE_SHARC_PUSH"))
+        std::fprintf(stderr, "[push-func] ser=%u pc=%08X a=%02X data=%08X d=%08X (q=%zu)\n",
+                     ser, m_cpu ? m_cpu->get_ip() : 0, a, data, d, m_fifo_in.q.size());
     copro_update_flags();
 }
 

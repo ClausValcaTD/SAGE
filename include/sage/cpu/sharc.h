@@ -61,21 +61,21 @@ inline const char* tag() { return "sharc"; }
 
 template <typename T>
 constexpr std::uint32_t BIT(T value, int start) {
-    return (std::uint32_t(value) >> start) & 1u;
+    return (std::uint64_t(value) >> start) & 1u;
 }
 template <typename T>
 constexpr std::uint32_t BIT(T value, int start, int count) {
-    return (std::uint32_t(value) >> start) & ((std::uint32_t(1) << count) - 1u);
+    return (std::uint64_t(value) >> start) & ((std::uint64_t(1) << count) - 1u);
 }
 
 template <typename T>
 constexpr std::int32_t sext(T value, int bits) {
-    const std::uint32_t m = std::uint32_t(1) << (bits - 1);
-    return std::int32_t((std::uint32_t(value) ^ m) - m);
+    const std::uint64_t m = std::uint64_t(1) << (bits - 1);
+    return std::int32_t((std::uint64_t(value) ^ m) - m);
 }
 template <typename T>
 constexpr std::uint32_t make_bitmask(int bits) {
-    return (std::uint32_t(1) << bits) - 1u;
+    return std::uint32_t((std::uint64_t(1) << bits) - 1u);
 }
 
 class Sharc {
@@ -102,6 +102,7 @@ public:
 
     // FLAG0..3 inputs (mode2 must select them as inputs).
     void set_flag_input(int flag_num, int state);
+    std::uint32_t flag_input(int n) const { return m_core->flag[n]; }
     void write_stall(int state);
 
     std::uint32_t pc() const { return m_core->pc; }
@@ -403,6 +404,34 @@ private:
 
     std::uint64_t m_instructions = 0;
     std::map<std::uint32_t, std::uint64_t>* m_pc_hist = nullptr;
+public:
+    long m_trace_count = 0;
+    long m_wait_dbg = 0;
+    std::uint32_t* m_ring = nullptr;
+    std::uint64_t* m_ring_op = nullptr;
+    std::uint32_t* m_ring_d = nullptr;
+    std::uint32_t* m_ring_f = nullptr;
+    std::uint32_t* m_ring_nf = nullptr;
+    unsigned m_ring_pos = 0;
+    bool m_ring_dumped = false;
+    std::uint32_t m_win_lo = 0, m_win_hi = 0;
+    void set_window(std::uint32_t lo, std::uint32_t hi) { m_win_lo = lo; m_win_hi = hi; }
+    bool m_badpc_trace = false;
+    bool m_loop_dbg = false;
+    bool m_cmd_trig = false;
+    bool m_cmd_started = false;
+    int m_cmd_left = 0;
+    bool m_dm_dbg = false;
+    bool m_unmapped_dbg = false;
+    void set_ring(std::uint32_t* pc, std::uint64_t* op, std::uint32_t* d, std::uint32_t* f,
+                  std::uint32_t* nf) {
+        m_ring = pc;
+        m_ring_op = op;
+        m_ring_d = d;
+        m_ring_f = f;
+        m_ring_nf = nf;
+    }
+private:
 
     ExtReadFn m_ext_read;
     ExtWriteFn m_ext_write;
