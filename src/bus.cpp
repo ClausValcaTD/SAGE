@@ -232,8 +232,15 @@ std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) cons
         return const_cast<std::uint8_t*>(m_rom) + addr;
 
     if (in_range(addr, len, kRam0020Base, m_ram_0020.size())) {
-        writable = true;
-        return const_cast<std::uint8_t*>(m_ram_0020.data()) + (addr - kRam0020Base);
+        // MAME maps 0x00200000-0x0021ffff as RAM and 0x00220000-0x0023ffff as
+        // maincpu ROM at offset 0x20000.
+        if (addr - kRam0020Base < kRam0020Size) {
+            writable = true;
+            return const_cast<std::uint8_t*>(m_ram_0020.data()) + (addr - kRam0020Base);
+        }
+        const std::uint32_t off = 0x20000 + (addr - (kRam0020Base + kRam0020Size));
+        if (off + len <= m_rom_size)
+            return const_cast<std::uint8_t*>(m_rom) + off;
     }
     if (in_range(addr, len, kWorkRamBase, m_workram.size())) {
         writable = true;
@@ -696,8 +703,16 @@ void Bus::write32(std::uint32_t addr, std::uint32_t val) {
 }
 
 bool Bus::burst(std::uint32_t addr) const {
+    // MAME flags these i960 regions i960_cpu_device::BURST (model2_base_mem,
+    // model2_5881_mem, model2_tgp_mem). The i960 only advances the address of a
+    // multi-word load/store when the target reports BURST, so ROM and RAM must
+    // both qualify; otherwise ldq/stq fold onto a single word.
+    if (addr >= kGeoPrgBase && addr < kGeoPrgBase + 0x4000) return true;
+    if (addr >= kCoproFunctionBase && addr < kCoproFunctionBase + 0x4000) return true;
+    // The CPU wait-state block is the one plain-RAM aperture MAME leaves non-BURST.
+    if (addr >= kCpuCtlBase && addr < kCpuCtlBase + kCpuCtlSize) return false;
     bool w = false;
-    return map(addr, 4, w) != nullptr && w;
+    return map(addr, 4, w) != nullptr;
 }
 
 std::string Bus::describe(std::uint32_t addr) const {

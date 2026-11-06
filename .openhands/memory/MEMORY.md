@@ -221,3 +221,33 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   `SAGE_WAITDBG`, `SAGE_SHARC_RING`, `SAGE_SHARC_WIN`, `SAGE_SHARC_BADPC`,
   `SAGE_SHARC_LOOPDBG`, `SAGE_SHARC_CMD`, `SAGE_SHARC_DM`, `SAGE_SHARC_UNMAP`,
   `SAGE_DISASM=<hex[:n],...>` (prints live disassembly at boot).
+
+## 0-polygon root cause: i960 BURST flag on ROM (2026-11-05)
+- **Symptom**: `GEO parses: N polygons rendered: 0` — the display list parsed but
+  every `object_data` (fn 01) submitted the SAME word 4× as tpa/tha/oba/obc, so
+  `obp` pointed at garbage and no polygon ever reached the rasteriser.
+- **Root cause**: `Bus::burst()` returned true only for *writable* memory
+  (`map(...) && w`). The i960 core's `ldq`/`ldt`/`ldl`/`stq` advance the address
+  only when the target reports BURST (`if (flags & kBurst) t1 += 4;`). MAME flags
+  the `main_data` ROM region (and maincpu ROM, workram, bufferram, geo_prg,
+  copro_function, texture/luma/palette/backup RAM) with
+  `i960_cpu_device::BURST`. Without it, `ldq (g5),g4` at PC 0x65CD4 read
+  main_data 0x0207A470 four times instead of the real quad
+  `002142D8 00944350 00004929 0021000F` → 4 identical operands.
+- **Fix** (`src/bus.cpp::burst`): return true for every region MAME flags BURST.
+  Practically: `map(addr,4,w) != nullptr` (drop the `&& w`), plus explicit true
+  for geo_prg (0x00804000) and copro_function (0x00880000) which have no `map`
+  entry, and explicit **false** for the CPU wait-state block 0x00e00000
+  (`kCpuCtlBase`), the one plain-RAM aperture MAME leaves non-BURST.
+- **Result**: 80677 polygons rendered over 1300 frames; frame dumps show the DOA
+  title screen + 3D content (36 unique colours, no longer all-black).
+- **Second fix** (`Bus::map`): MAME maps 0x00200000-0x0021ffff as RAM and
+  0x00220000-0x0023ffff as **maincpu ROM at +0x20000** (`model2_5881_mem`); SAGE
+  had the whole 256 KiB as RAM. Now split accordingly (read-only upper half).
+- **How to verify**: `SAGE_HEADLESS=1 ./build/sage roms/doa.zip doa 1300` → expect
+  `polygons rendered` in the tens of thousands, not 0. (Polygons start rendering
+  ~frame 1050 when the game first uploads its display list; earlier frames are
+  legitimately empty because geoctl/boot hasn't happened yet.)
+- **Method that found it**: diff SAGE's memory map + `burst()` semantics against
+  MAME (`references/model2.cpp` map + `references/i960/i960.cpp` ldq/stq). No
+  opcode hunting — the reference cores had the answer.
