@@ -20,12 +20,8 @@ namespace sage {
 namespace {
 
 // System 24 tile generator geometry (segas24_tile_device::char_layout): 8x8
-// tiles, 4 planes, planeoffset {0,1,2,3}, xoffset STEP8(0,4), yoffset
-// STEP8(0,32), charincrement 8*32 = 256 bits (16 words) per tile. The decoded
-// bit for pixel (x,y) plane p is at `code*256 + p + y*32 + x*4`, read LSB-first
-// from the byte array; xormask 8 (see NATIVE_ENDIAN_VALUE_LE_BE) swaps the two
-// bytes of each 16-bit char word relative to the i960's big-endian store.
-constexpr int kTileBits = 8 * 32;
+// tiles, 4 planes, two pixels per byte, 32 bytes per tile. Tile RAM is 64x64
+// cells; MAME indexes it as 16-bit words at 0x0000/0x1000/0x2000/0x3000.
 constexpr int kTilemapDim = 64;  // 64x64 tiles
 
 // Palette / colour-translation layout (all byte offsets from 0x01800000).
@@ -157,20 +153,19 @@ void Video::rebuild_palette() {
     m_palette_dirty = false;
 }
 
-// Decodes one tile pixel: 8x8, 4 planes. Plane p of pixel (x,y) lives at bit
-// `code*256 + p + y*32 + x*4`, read LSB-first; bit order per MAME gfx_element.
+// Decodes one tile pixel: 8x8, 4 planes, two pixels per byte, high nibble
+// first (segas24_tile_device::char_layout, planes {0,1,2,3}, xoffset STEP8(0,4),
+// yoffset STEP8(0,32), charincrement 32 bytes). The byte index is XORed with
+// one because MAME builds the graphics element over a 16-bit array with a
+// little-endian byte swap (NATIVE_ENDIAN_VALUE_LE_BE(8,0)); without it each
+// pair of bytes is read swapped and the image combs. Mirrors sm2_emu
+// decode_tile_pixel().
 int tile_pixel(const std::vector<std::uint8_t>& chram, int code, int x, int y) {
-    const int base = (code & 0x3fff) * kTileBits;
-    int pen = 0;
-    for (int p = 0; p < 4; ++p) {
-        const int b = base + p + y * 32 + x * 4;
-        const std::size_t off = static_cast<std::size_t>(b >> 3);
-        if (off >= chram.size())
-            continue;
-        if (chram[off] & (1 << (b & 7)))
-            pen |= 1 << p;
-    }
-    return pen;
+    const int index = (code & 0x3fff) * 32 + ((y * 4 + (x >> 1)) ^ 1);
+    if (index < 0 || static_cast<std::size_t>(index) >= chram.size())
+        return 0;
+    const std::uint8_t byte = chram[static_cast<std::size_t>(index)];
+    return (x & 1) == 0 ? (byte >> 4) : (byte & 0x0f);
 }
 
 void Video::draw_tile_layers(int group) {
