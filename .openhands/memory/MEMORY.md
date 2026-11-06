@@ -251,3 +251,14 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - **Method that found it**: diff SAGE's memory map + `burst()` semantics against
   MAME (`references/model2.cpp` map + `references/i960/i960.cpp` ldq/stq). No
   opcode hunting — the reference cores had the answer.
+
+## Git push auth quirk (2026-11-05)
+- The remote's embedded credential (`https://ghu_...@github.com/M5Devs/SAGE.git`)
+  is **stale** — `git push origin main` hangs on an interactive password prompt
+  (and there is no TTY, so it just times out).
+- Working push: `git -c credential.helper= push
+  "https://x-access-token:${GITHUB_TOKEN}@github.com/M5Devs/SAGE.git" main`
+  (inline, no persisted credential). `GITHUB_TOKEN` is injected from secrets.
+- `M5Devs/SAGE` is **public**, default branch `main`; raw files are reachable at
+  `https://raw.githubusercontent.com/M5Devs/SAGE/main/<path>`.
+- Screenshots live in `docs/screenshots/` (PPM→PNG via Pillow, 2× NEAREST).
