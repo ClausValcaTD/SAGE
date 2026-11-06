@@ -7,6 +7,10 @@ This initial milestone implements the **ROM loader**: it parses a MAME-compatibl
 `doa.zip` and assembles the game's memory regions exactly the way MAME's
 `ROM_START( doa )` / `ROM_START( doab )` in `src/mame/sega/model2.cpp` describe.
 
+## 📸 Screenshots
+
+![Dead or Alive 3D Rendering](docs/screenshots/doa_3d_title.png)
+
 ## Layout
 
 ```
