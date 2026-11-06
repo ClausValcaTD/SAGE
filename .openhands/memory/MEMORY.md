@@ -262,3 +262,27 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - `M5Devs/SAGE` is **public**, default branch `main`; raw files are reachable at
   `https://raw.githubusercontent.com/M5Devs/SAGE/main/<path>`.
 - Screenshots live in `docs/screenshots/` (PPM→PNG via Pillow, 2× NEAREST).
+
+## System 24 tile decode: byte-pair XOR (2026-11-05)
+- **Symptom**: text glyphs and cloud backgrounds had horizontal combing /
+  interleaving — each pair of pixels looked swapped ("almost right").
+- **Root cause**: SAGE's `tile_pixel()` read 4 bitplanes LSB-first straight from
+  the char-RAM byte array (`code*256 + p + y*32 + x*4`, bit `b&7`). MAME's
+  `gfx_element` builds the tile over a **uint16_t** array, so the byte index is
+  XORed with **1** (`NATIVE_ENDIAN_VALUE_LE_BE(8,0)` → xormask 0x08 on LE hosts).
+  Without that XOR the two bytes of each 16-bit char word are read swapped.
+- **Fix** (`src/video.cpp`): decode as 2 pixels/byte, high nibble first:
+  `index = code*32 + ((y*4 + (x>>1)) ^ 1)`; even x → `byte>>4`, odd x → `byte&0xf`.
+  This is byte-for-byte the validated `sm2_emu` `decode_tile_pixel()`.
+- **Ground truth**: `references/sm2_emu/src/hw/segaic24.cpp` has an explicit
+  comment on exactly this ("Omitting that swaps pixels in pairs, which looks
+  almost right"). `references/segaic24.cpp` `char_layout` = 8x8, planes {0,1,2,3},
+  xoffset STEP8(0,4), yoffset STEP8(0,32), charincrement 32 bytes.
+- **Addressing was already correct** (do not touch): name tables at word
+  0x0000/0x1000/0x2000/0x3000 (= byte 0/0x2000/0x4000/0x6000); hscr/vscr regs at
+  `tile_ram[0x5000/0x5004 + (layer>>1)]` → SAGE's `(0x5000+layer)` matches.
+- **Method**: simulated MAME's `decode()` (readbit MSB-first, planebit 1<<(3-p),
+  xormask 8) vs sm2 vs SAGE in Python — sm2 == MAME exactly, SAGE differed.
+- **Env quirk**: `cmake`/`ninja` are pip-installed under `~/.local`; a container
+  reset wiped them → `pip install cmake ninja` and re-add `~/.local/bin` to PATH.
+  A stale `build/` from a different cmake just reconfigured cleanly.
