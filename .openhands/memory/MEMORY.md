@@ -328,3 +328,30 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   point) with no hang.
 - `ffmpeg`/`ffprobe`/`Pillow` are **not** preinstalled → `sudo -n apt-get install -y
   ffmpeg`; `pip3 install Pillow`. Pillow's `Image.getdata` is deprecated (warns).
+
+## 3D layer compositing fix (2026-11-05)
+- **Two independent bugs kept Model 2B polygons out of the final frame.**
+- **Geometry**: `Geometry::push()` bottom clip plane had operands swapped vs
+  MAME `model2_v.cpp`: SAGE had `m_viewport[1] - m_center[i][1]` (→ -192,
+  `normal.pz = -0.99999`) instead of `m_center[i][1] - m_viewport[1]` (→ +192).
+  That culled **every** polygon with `pz > 0`, leaving the 3D buffer empty.
+  One-line operand swap; 3D buffer went 0 → ~19k–23k non-black pixels.
+- **Compositing**: `Video::draw_tile_layers(group)` is called twice around the 3D
+  draw. The sprite pass (`group != 0`) must draw only cells whose System 24
+  screen-space priority bit (tile RAM `0x6000`, 4 words/row, MSB-first per
+  8-px cell) is **set**; the background pass draws the clear cells. Condition:
+  `pri_bit != sprite_pass → skip`. DoA never writes the mask, so the whole
+  background ends up behind the 3D layer — matching MAME `screen_update()`.
+  Also: `opaque` must be false on the sprite pass, else pass 1 repaints.
+- **bus.cpp**: System 24 H/V sync outputs at `0x01040000`/`0x01060000` must be
+  routed to the video CRTC offsets (`write_hsync`/`write_vsync`) **before**
+  `is_nopw()`. MAME maps them as 16-bit handlers on the tile device
+  (`xhout_w`/`xvout_w` → `horizontal_sync_w`/`vertical_sync_w`). Without this the
+  viewport offset never reached the 3D renderer and every polygon projected
+  off-screen. Note: `bus.cpp` handles these in both `write8` and `write32`.
+- **Verification**: `frame==3D` is now 23233/23233 (frame 1200) and
+  18938/18938 (frame 2000); 3D bbox y varies 65→424 across frames (dynamic
+  geometry, no longer a static/blank layer). Branch `fix/3d-layer-compositing`.
+- **Do NOT** use tile-word bit 15 (category) as the 3D/sprite split: empirically
+  it hides the 3D entirely (frame uniq dropped to 25). The screen-space priority
+  mask at `0x6000` is the correct discriminator.
