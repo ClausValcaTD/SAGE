@@ -403,3 +403,23 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
   token (use `${GITHUB_TOKEN}`).
 - Fixed video is **smaller** (6.16 MB vs 14.85 MB) at the same CRF 30 — the
   streaking was high-frequency noise that h264 was spending bits on.
+
+## Milestone 7: SCSP sound board (2026-11-05)
+- New subsystem: 68EC000 (`third_party/musashi` v4.60, 68000-only) + Yamaha
+  YMF292 SCSP + i8251 link. Files: `include/sage/cpu/m68000.h`,
+  `include/sage/hw/{compat,scsp,scsp_dsp,i8251,sound_board}.h` and matching
+  `src/`. Wired into `Bus` via `tick_sound()` from the main loop.
+- **Musashi opcodes are generated at build time** by the `m68kmake` host tool
+  (CMake `add_custom_command` → `${CMAKE_BINARY_DIR}/musashi`); do NOT commit
+  `m68kops.c/h`. The `musashi` lib must also compile `softfloat/softfloat.c`
+  even for 68000-only, because `m68kcpu.c` references `m68kfpu.c` symbols.
+- Host UART at `0x009c0000` is `umask32(0x000000ff)`: data +0, status +4 (one
+  dword apart — different from the 2A/2C boards' half stride). Sound IRQ = bit
+  10 of intreq/intena; the i8251 ready handler is level-based, not edge.
+- Sound clocks kept exact: 68000 = host×7056/15625, SCSP = 22.5792 MHz/512 =
+  44100 Hz, 256 68000 cycles per sample; remainder carried between calls.
+- `Bus::attach(roms, game)` takes the set name now (drives SCSP flat gain).
+- Optional `SAGE_WAV` dumps SCSP output as 16-bit stereo for audio checks.
+- Verified: sound program runs, SCSP keys slots and produces structured audio;
+  rendered video is byte-identical to before (cmp of SAGE_RAWVIDEO).
+- Details in `.openhands/memory/2026-11-05.md`. Branch `feat/scsp-sound-board`.
