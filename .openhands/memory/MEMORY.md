@@ -286,3 +286,29 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - **Env quirk**: `cmake`/`ninja` are pip-installed under `~/.local`; a container
   reset wiped them → `pip install cmake ninja` and re-add `~/.local/bin` to PATH.
   A stale `build/` from a different cmake just reconfigured cleanly.
+
+## SHARC `sext()` masking bug — root cause of copro FIFO over-read (2026-11-07)
+- **Symptom**: SHARC read the i960→SHARC input FIFO far more often than the i960
+  pushed (17,164 empty-FIFO reads at `pc=0x20D97`), with bogus external read
+  addresses (`0x4811D1`, `0x55E192`, …). Polygon output was garbage (177,677
+  "polygons" that never changed) yet the emulator looked healthy.
+- **Root cause**: `sext()` in `include/sage/cpu/sharc.h` did **not** mask its
+  input to `bits` before sign-extending. `op_get_reladdr()` calls
+  `sext(opcode >> 27, 6)` — the arg is 20+ bits, so the high bits leaked into the
+  result. The opcode `0x6E7E090B0800` (`DM(I7,M1)` post-modify, mod field = 1)
+  produced `0xDD9C1` instead of `1`, so `I7` walked out of internal DM
+  (`0x3030C`) into the FIFO window after a handful of iterations.
+- **Fix**: `raw = value & ((1<<bits)-1); return (raw ^ m) - m;` — byte-for-byte
+  MAME's `util::sext` and the `references/sm2_emu/src/cpu/sharc/sharc.cpp` port.
+  **One-line-class change; the scheduler was never the problem.**
+- **Verification**: empty-FIFO reads 17,164 → **0**; polygons now grow with frames
+  (3000f=16,985, 6000f=54,168) and frames render real attract-mode content.
+  The old 177,677 figure was garbage from corrupted SHARC state — do not treat it
+  as a baseline.
+- **Lesson**: when a DAG/index register "wanders", check field-extraction helpers
+  (`sext`, `BIT`) against MAME before suspecting the FIFO protocol or scheduler.
+  ElSemi's `m2emu` (and MAME) run i960 & SHARC in **separate scheduler
+  timeslices**; SAGE's lockstep `tick_copro()` is fine once decoding is correct.
+- **Debug env flags used**: `SAGE_SHARC_WIN=lo:hi` (DAG/reg snapshot at a PC),
+  `SAGE_SHARC_DUMP=pc:count` (PM48 dump + disasm via `/tmp/sharcdis/sharcdis`),
+  `SAGE_SHARC_FIFO`, `SAGE_FIFO_EMPTY`, `SAGE_RAWVIDEO=<path>` (RGB24 frames).

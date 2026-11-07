@@ -70,8 +70,12 @@ constexpr std::uint32_t BIT(T value, int start, int count) {
 
 template <typename T>
 constexpr std::int32_t sext(T value, int bits) {
+    // Mask to `bits` first: callers pass wider values (e.g. op_get_reladdr hands
+    // over `opcode >> 27` expecting a 6-bit field). Without the mask the high
+    // bits leak into the result and corrupt DAG index registers.
     const std::uint64_t m = std::uint64_t(1) << (bits - 1);
-    return std::int32_t((std::uint64_t(value) ^ m) - m);
+    const std::uint64_t raw = std::uint64_t(value) & ((std::uint64_t(1) << bits) - 1u);
+    return std::int32_t((raw ^ m) - m);
 }
 template <typename T>
 constexpr std::uint32_t make_bitmask(int bits) {
