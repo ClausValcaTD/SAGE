@@ -169,16 +169,17 @@ int tile_pixel(const std::vector<std::uint8_t>& chram, int code, int x, int y) {
 }
 
 void Video::draw_tile_layers(int group) {
-    // MAME screen_update() draws tilemaps {3,2} opaque, then {1,0} transparent,
-    // then the 3D layer, then the sprite tilemaps {(layer<<1)|1}. Without a
-    // priority bitmap the sprite pass is a no-op, so both groups draw all four
-    // tilemaps in the same order; `group` only affects the opaque flag.
+    // MAME screen_update() draws the tilemaps twice: before the 3D layer with
+    // priority 0 (tilemaps 3,2 opaque, 1,0 transparent) and after it with
+    // priority 1. draw_rect hides an 8-pixel cell when its screen-space
+    // priority bit (tile RAM 0x6000) is set; Dead or Alive never writes that
+    // mask, so the whole background sits behind the 3D polygons.
     static constexpr int kOrder[4] = {3, 2, 1, 0};
-    (void)group;
-
+    const bool sprite_pass = (group != 0);
     for (int idx = 0; idx < 4; ++idx) {
         const int layer = kOrder[idx];
-        const bool opaque = (layer >= 2);
+        const bool opaque = (layer >= 2) && !sprite_pass;
+        const int mask_base = 0x6000;  // MAME: tile_ram + (layer & 4 ? 0x6800 : 0x6000)
 
         const std::uint16_t vscr_reg = rd16(m_tile, (0x5004 + layer) * 2);
         if (vscr_reg & 0x8000)  // layer disabled
@@ -202,6 +203,11 @@ void Video::draw_tile_layers(int group) {
                     for (int px = 0; px < 8; ++px) {
                         const int mx = (tx * 8 + px + hscr) & 0x1ff;
                         if (mx >= kWidth)
+                            continue;
+                        const std::uint16_t mw =
+                            rd16(m_tile, (mask_base + my * 4 + (mx >> 7)) * 2);
+                        const bool pri_bit = (mw & (0x8000 >> ((mx & 127) >> 3))) != 0;
+                        if (pri_bit != sprite_pass)
                             continue;
                         const int pen = tile_pixel(m_char, code, px, py);
                         if (pen == 0 && !opaque)
@@ -239,7 +245,6 @@ void Video::render() {
 
     std::fill(m_rgba.begin(), m_rgba.end(), m_palette[0]);
     draw_tile_layers(0);
-
     // 3D polygons sit between the background tiles and the sprite tiles.
     if (m_geometry && !m_render_test_mode) {
         const std::uint32_t* poly = m_geometry->render();

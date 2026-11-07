@@ -578,6 +578,20 @@ void Bus::write8(std::uint32_t addr, std::uint8_t val) {
     }
     if (write_register(addr, addr & 3, val))
         return;
+
+    // System 24 H/V sync outputs (0x01040000/0x01060000). MAME registers these
+    // as 16-bit handlers on the tile device, so the i960 writes them as words;
+    // decode them here (before is_nopw()) or the CRTC viewport offset never
+    // reaches the 3D renderer and every polygon projects off-screen.
+    if (addr >= 0x01040000 && addr < 0x01060000) {
+        m_video.write_hsync(addr & 3, val);
+        return;
+    }
+    if (addr >= 0x01060000 && addr < 0x01080000) {
+        m_video.write_vsync(addr & 3, val);
+        return;
+    }
+
     if (is_nopw(addr))
         return;
     ++unmapped_writes;

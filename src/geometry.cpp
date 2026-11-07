@@ -1015,7 +1015,7 @@ void Geometry::push(u32 input) {
                     const float left_plane = static_cast<float>(m_center[i][0] - m_viewport[0]);
                     const float right_plane = static_cast<float>(m_viewport[2] - m_center[i][0]);
                     const float top_plane = static_cast<float>(m_viewport[3] - m_center[i][1]);
-                    const float bottom_plane = static_cast<float>(m_viewport[1] - m_center[i][1]);
+                    const float bottom_plane = static_cast<float>(m_center[i][1] - m_viewport[1]);
 
                     m_clip_plane[i][0].normal.x = 1.0f / std::hypot(1.0f, left_plane);
                     m_clip_plane[i][0].normal.y = 0.0f;
