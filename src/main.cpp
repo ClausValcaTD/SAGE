@@ -479,7 +479,7 @@ int main(int argc, char** argv) {
             std::fprintf(f, "P6\n%d %d\n255\n", sage::Geometry::kWidth, sage::Geometry::kHeight);
             for (int y = 0; y < sage::Geometry::kHeight; ++y)
                 for (int x = 0; x < sage::Geometry::kWidth; ++x) {
-                    const std::uint32_t c = px[y * sage::Geometry::kWidth + x];
+                    const std::uint32_t c = px[y * sage::Geometry::kDestStride + x];
                     const std::uint8_t rgb[3] = {static_cast<std::uint8_t>(c >> 16),
                                                  static_cast<std::uint8_t>(c >> 8),
                                                  static_cast<std::uint8_t>(c)};

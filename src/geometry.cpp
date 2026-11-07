@@ -27,7 +27,7 @@ using u32 = std::uint32_t;
 using s16 = std::int16_t;
 using s32 = std::int32_t;
 
-constexpr int kStride = 512;         // destmap / fillmap row pitch (MAME: 512x512)
+constexpr int kStride = Geometry::kDestStride;  // destmap / fillmap row pitch
 constexpr int kClipLeft = 0;
 constexpr int kClipTop = 0;
 constexpr int kClipRight = Geometry::kWidth - 1;    // 495

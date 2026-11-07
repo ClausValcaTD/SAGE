@@ -250,7 +250,8 @@ void Video::render() {
         const std::uint32_t* poly = m_geometry->render();
         if (poly) {
             for (int y = 0; y < kHeight; ++y) {
-                const std::uint32_t* src = poly + static_cast<std::size_t>(y) * Geometry::kWidth;
+                const std::uint32_t* src =
+                    poly + static_cast<std::size_t>(y) * Geometry::kDestStride;
                 std::uint32_t* dst = m_rgba.data() + static_cast<std::size_t>(y) * kWidth;
                 for (int x = 0; x < kWidth; ++x) {
                     if (src[x] != 0)  // 0 = transparent in the geometry surface

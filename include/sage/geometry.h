@@ -27,6 +27,11 @@ public:
     static constexpr int kWidth = 496;
     static constexpr int kHeight = 384;
 
+    // The 3D surface is allocated and rasterised at a 512-pixel row pitch (the
+    // hardware destmap is 512x512), then composited as a 496x384 cliprect.
+    // Writers and readers MUST agree on this pitch or every scanline shears.
+    static constexpr int kDestStride = 512;
+
     // In MAME, `pz`/`pu`/`pv` are macros over the first three of the four
     // iterated parameters of poly_manager::vertex_t.
     struct Vertex {
