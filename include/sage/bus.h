@@ -5,12 +5,15 @@
 #include <map>
 #include <utility>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "sage/cpu/i960.h"
 #include "sage/cpu/sharc.h"
 #include "sage/eeprom.h"
 #include "sage/geometry.h"
+#include "sage/hw/i8251.h"
+#include "sage/hw/sound_board.h"
 #include "sage/io.h"
 #include "sage/protection.h"
 #include "sage/rom_loader.h"
@@ -42,7 +45,7 @@ public:
 
     Bus() = default;
 
-    void attach(const RomLoader& roms);
+    void attach(const RomLoader& roms, std::string_view game = "doa");
     void set_cpu(cpu::I960* cpu) { m_cpu = cpu; }
     void set_inputs(const InputState& in) { m_inputs = in; }
     InputState& inputs() { return m_inputs; }
@@ -78,6 +81,16 @@ public:
     const cpu::Sharc& sharc() const { return m_sharc; }
     cpu::Sharc& sharc_mutable() { return m_sharc; }
     const std::string& copro_fault() const { return m_copro_fault; }
+
+    // ---- Sound ------------------------------------------------------------
+    // The sound board is clocked from the host i960's cycles (25 MHz), which is
+    // how the reference machine advances it. `sound_ready_w` raises the host
+    // sound interrupt (IRQ2 bit 10) when the i8251 has a byte ready either way.
+    void tick_sound(int cycles);
+    hw::SoundBoard& sound() { return m_sound; }
+    const hw::SoundBoard& sound() const { return m_sound; }
+    hw::I8251& uart() { return m_uart; }
+    const hw::I8251& uart() const { return m_uart; }
 
     // ---- Video ------------------------------------------------------------
     // Render mode bit 2: true = 60 Hz, false = 30 Hz (matches MAME).
@@ -133,6 +146,7 @@ private:
 
     void irq_update();
     void eeprom_write(std::uint8_t data);
+    void sound_ready_w();
     std::uint8_t in0_read() const;
     void copro_fifo_w(std::uint32_t data);
     void copro_function_port_w(std::uint32_t offset, std::uint32_t data);
@@ -191,6 +205,8 @@ private:
 
     Video m_video;
     Geometry m_geometry;
+    hw::SoundBoard m_sound;
+    mutable hw::I8251 m_uart;
     mutable Io3155649 m_io;  // register reads have side effects
     Eeprom93C46 m_eeprom;
     mutable Sega3155838Comp m_protection{Sega3155838Comp::Variant::Sega3170229};
