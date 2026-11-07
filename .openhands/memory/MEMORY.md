@@ -379,3 +379,27 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - **Tools**: ffmpeg/ffprobe not preinstalled; `sudo -n apt-get update && sudo -n
   apt-get install -y ffmpeg` (the first install failed before `apt-get update`).
   Pillow 13.0.0 + numpy installed via pip3.
+
+## Scanline streaking fix (2026-11-05)
+- **Root cause was NOT the edge-walking maths** — SAGE's `fill_triangle`/
+  `fill_polygon` already matched MAME poly.h and `references/sm2_emu`'s
+  `render_triangle`/`render_convex` almost line-for-line. The bug was a **row-pitch
+  mismatch**: `geometry.cpp` rasterises into `m_dest` at pitch `kStride = 512`
+  (MAME's 512x512 destmap), but the *readers* walked the surface at the 496-pixel
+  display width. Reading row `y` at `y*496` while it was written at `y*512` skips
+  16 px per row → diagonal shear / horizontal smearing across the screen.
+- Fix: added `Geometry::kDestStride = 512` as the single source of truth;
+  `kStride` aliases it, and `video.cpp` (compositor) + `main.cpp` (PPM3D dump)
+  now index with `kDestStride`. Committed `7b4608d`.
+- **Diagnostic**: dump the raw 3D surface with `SAGE_PPM3D` and count rows whose
+  nonzero span is >80% of width — 55 streak rows before, 0 after at frame 1500.
+  The *composited* frame is a poor metric (full-width tile background dominates);
+  always measure the isolated 3D layer.
+- **Environment resets**: a mid-session restart wiped `/tmp`, pip packages, apt
+  ffmpeg, and the pip cmake. Reinstall cmake via `pip3 install cmake` (binary lands
+  at `~/.local/bin/cmake`), ffmpeg via `sudo -n apt-get update && apt-get install
+  -y ffmpeg`, numpy/pillow via pip. Also reset git identity (`git config user.name
+  openhands` / `user.email openhands@all-hands.dev`) and the `origin` remote URL
+  token (use `${GITHUB_TOKEN}`).
+- Fixed video is **smaller** (6.16 MB vs 14.85 MB) at the same CRF 30 — the
+  streaking was high-frequency noise that h264 was spending bits on.
