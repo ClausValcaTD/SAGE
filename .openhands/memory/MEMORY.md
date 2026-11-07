@@ -355,3 +355,27 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - **Do NOT** use tile-word bit 15 (category) as the 3D/sprite split: empirically
   it hides the 3D entirely (frame uniq dropped to 25). The screen-space priority
   mask at `0x6000` is the correct discriminator.
+
+## Pushed to origin/main (2026-11-05)
+- `fix/3d-layer-compositing` fast-forwarded into `main` and pushed:
+  `981f882` (compositing fix) + `c4e5ce1` (memory notes). Remote head then
+  advanced by `bc46c1f` (refreshed video + screenshot).
+- **Push auth**: the repo's embedded `origin` URL token (`ghu_…`) no longer
+  authenticates — `git push` prompts for a password and hangs. Fix:
+  `git remote set-url origin https://${GITHUB_TOKEN}@github.com/M5Devs/SAGE.git`
+  then `GIT_TERMINAL_PROMPT=0 git push origin main`. (Same quirk noted earlier
+  in memory; the old token in the remote is stale.)
+- **Video refresh recipe** (post-fix): `SAGE_HEADLESS=1 SAGE_RAWVIDEO=/tmp/sage_raw.rgb
+  ./build/sage roms/doa.zip doa 3600` → exactly 2,057,011,200 bytes. Encode with
+  **CRF 30 / preset slow** (not the 2500k bitrate from the old recipe — the new
+  3D content is much busier and 2500k produced 33 MB). CRF 30 → 14.8 MB,
+  mean abs pixel diff 2.31 vs source; CRF 33 → 11.8 MB / 3.0 diff.
+  Command: `ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 496x384 -r 60 -i /tmp/sage_raw.rgb
+  -vf "scale=992:768:flags=neighbor" -c:v libx264 -crf 30 -preset slow
+  -pix_fmt yuv420p -movflags +faststart docs/videos/doa_intro.mp4`.
+- **Best screenshot frame**: 2700 (64,844 3D px = highest of the run; frame 1500
+  peaks ~33k, 2760 ~44k). `SAGE_PPM3D` dumps the raw 3D layer for measuring
+  coverage. Screenshot upscaled 496x384 → 992x768 with NEAREST.
+- **Tools**: ffmpeg/ffprobe not preinstalled; `sudo -n apt-get update && sudo -n
+  apt-get install -y ffmpeg` (the first install failed before `apt-get update`).
+  Pillow 13.0.0 + numpy installed via pip3.
