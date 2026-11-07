@@ -138,6 +138,22 @@ bool write_ppm(const char* path, const sage::Video& video) {
     return true;
 }
 
+// Appends one rendered frame as packed RGB24 to an open stream (SAGE_RAWVIDEO),
+// so frames can be piped straight into ffmpeg.
+void write_rgb24(std::FILE* f, const sage::Video& video) {
+    const std::uint32_t* px = video.rgba();
+    std::vector<std::uint8_t> row(static_cast<std::size_t>(sage::Video::kWidth) * 3);
+    for (int y = 0; y < sage::Video::kHeight; ++y) {
+        for (int x = 0; x < sage::Video::kWidth; ++x) {
+            const std::uint32_t c = px[y * sage::Video::kWidth + x];
+            row[x * 3 + 0] = static_cast<std::uint8_t>(c >> 16);
+            row[x * 3 + 1] = static_cast<std::uint8_t>(c >> 8);
+            row[x * 3 + 2] = static_cast<std::uint8_t>(c);
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -286,6 +302,16 @@ int main(int argc, char** argv) {
                     frames == 1 ? "" : "s", kFrameRate, cycles_per_frame);
         std::printf("------------------------------------------------------------\n");
 
+        std::FILE* rawvideo = nullptr;
+        if (const char* rv = std::getenv("SAGE_RAWVIDEO")) {
+            rawvideo = std::fopen(rv, "wb");
+            if (rawvideo)
+                std::printf("Raw video: streaming %dx%d RGB24 frames to %s\n",
+                            sage::Video::kWidth, sage::Video::kHeight, rv);
+            else
+                std::printf("Raw video: cannot open %s\n", rv);
+        }
+
         for (long frame = 0; frame < frames && !faulted; ++frame) {
             if (display.is_open() && !display.pump()) {
                 std::printf("  window closed at frame %ld\n", frame);
@@ -319,6 +345,8 @@ int main(int argc, char** argv) {
 
             bus.trigger_vblank();
             bus.video().render();
+            if (rawvideo)
+                write_rgb24(rawvideo, bus.video());
             if (display.is_open()) {
                 display.present(bus.video().rgba());
                 if (std::getenv("SAGE_REALTIME"))
@@ -332,6 +360,8 @@ int main(int argc, char** argv) {
                             frame, cycles, cpu.get_ip(), bus.vblank_count());
             }
         }
+        if (rawvideo)
+            std::fclose(rawvideo);
         std::printf("------------------------------------------------------------\n\n");
     } else {
         std::printf("Execution trace (%ld instructions)\n", trace_instructions);
