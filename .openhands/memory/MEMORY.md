@@ -312,3 +312,19 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - **Debug env flags used**: `SAGE_SHARC_WIN=lo:hi` (DAG/reg snapshot at a PC),
   `SAGE_SHARC_DUMP=pc:count` (PM48 dump + disasm via `/tmp/sharcdis/sharcdis`),
   `SAGE_SHARC_FIFO`, `SAGE_FIFO_EMPTY`, `SAGE_RAWVIDEO=<path>` (RGB24 frames).
+
+## Video capture recipe (2026-11-07)
+- `SAGE_RAWVIDEO=<path>` appends each rendered frame as packed **RGB24 496x384**
+  (`src/main.cpp` `write_rgb24()`), so a run feeds ffmpeg without stdout mixing.
+  Add `SAGE_HEADLESS=1` to skip the SDL window; the build here is headless anyway
+  (SDL2 not found).
+- Full capture: `SAGE_HEADLESS=1 SAGE_RAWVIDEO=/tmp/sage_raw.rgb ./build/sage
+  roms/doa.zip doa 3600` → exactly `3600*496*384*3` = 2,057,011,200 bytes, ~4 min.
+- Encode: `ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 496x384 -r 60 -i /tmp/sage_raw.rgb
+  -vf "scale=992:768:flags=neighbor" -c:v libx264 -pix_fmt yuv420p -b:v 2500k
+  -movflags +faststart docs/videos/doa_intro.mp4` → 60.0 s, ~10 MB (GitHub-safe).
+- **Sequence timing**: black boot ≈0–9 s → logo ≈10 s → full 3D attract mode from
+  ≈20 s onward (frame ~1200). Motion continues past frame 1833 (the old stall
+  point) with no hang.
+- `ffmpeg`/`ffprobe`/`Pillow` are **not** preinstalled → `sudo -n apt-get install -y
+  ffmpeg`; `pip3 install Pillow`. Pillow's `Image.getdata` is deprecated (warns).
