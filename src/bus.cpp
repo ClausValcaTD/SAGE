@@ -11,6 +11,7 @@
 #include "sage/bus.h"
 
 #include <cstdio>
+#include <string_view>
 
 namespace sage {
 namespace {
@@ -48,6 +49,16 @@ constexpr std::size_t kCpuCtlSize = 0x00000038;
 constexpr std::size_t kProtSize = 0x00008000;
 constexpr std::size_t kTextureSize = 0x00100000;  // mirrored across 0x100000
 
+// The i960 on the Model 2 CPU board runs from a 50 MHz crystal divided by two.
+constexpr std::uint32_t kCpuClock = 25'000'000;
+// The host serial link: 8-N-1 at 31250 baud, ten bits per byte including the
+// start and stop bits.
+constexpr std::uint32_t kUartBitRate = 31'250;
+constexpr std::uint32_t kUartBitsPerByte = 10;
+// The host sound interrupt is bit 10 of the interrupt request/enable registers
+// (MAME's `const u32 line = 1 << 10` in sound_ready_w).
+constexpr std::uint32_t kSoundIrqLine = 1u << 10;
+
 // Write-only model2b registers that MAME maps as `.nopw()`: the ABSEL register,
 // the System 24 H/V sync outputs, the video sync switch and the 3D z-clip port.
 bool is_nopw(std::uint32_t addr) {
@@ -72,9 +83,16 @@ std::uint8_t byte_lane(std::uint32_t v, unsigned lane) {
     return static_cast<std::uint8_t>(v >> (lane * 8));
 }
 
+// A ROM region as a byte span, empty when the region is absent.
+std::span<const std::uint8_t> region_span(const RomLoader& roms, std::string_view name) {
+    if (const Region* r = roms.region(name))
+        return r->data;
+    return {};
+}
+
 }  // namespace
 
-void Bus::attach(const RomLoader& roms) {
+void Bus::attach(const RomLoader& roms, std::string_view game) {
     m_roms = &roms;
 
     if (const Region* cpu = roms.region("maincpu")) {
@@ -223,6 +241,19 @@ void Bus::attach(const RomLoader& roms) {
     m_geometry.set_luma_ram(m_luma.data());
     m_geometry.set_palette_ram(m_video.palram().data(), m_video.colorxlat().data());
     m_video.set_geometry(&m_geometry);
+
+    // Sound board: the 68EC000 + SCSP with the "audiocpu" program ROM and the
+    // "samples" PCM ROM. The serial link to the host is an i8251 whose transmit
+    // handler feeds the SCSP's MIDI port and whose receiver takes the SCSP's
+    // replies. The ready handler raises the host sound interrupt.
+    m_sound.attach(region_span(roms, "audiocpu"), region_span(roms, "samples"));
+    m_sound.configure_balance(std::string(game));
+    m_uart.set_tx_handler([this](std::uint8_t value) { m_sound.midi_in(value); });
+    m_sound.set_midi_out_handler([this](std::uint8_t value) { m_uart.write_rxd(value); });
+    m_uart.set_ready_handler([this] { sound_ready_w(); });
+    m_uart.configure(kCpuClock, kUartBitRate, kUartBitsPerByte);
+    m_sound.reset();
+    m_uart.reset();
 }
 
 std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) const {
@@ -344,9 +375,13 @@ bool Bus::read_register(std::uint32_t addr, unsigned lane, std::uint8_t& out) co
         }
     }
 
-    // 0x009c0000 i8251 UART, byte lane 0. Stubbed: transmitter ready.
+    // 0x009c0000 i8251 UART. MAME maps this range umask32(0x000000ff), so the
+    // two registers sit one dword apart: data at 0x009c0000 and status at
+    // 0x009c0004. The value returned here is the low byte lane, which is what
+    // umask32 leaves visible.
     if (addr >= kUartBase && addr < kUartBase + 8) {
-        out = (lane == 0) ? 0x05 : 0x00;  // TxRDY | TxEMPTY
+        // Only lane 0 is connected (umask32(0x000000ff)); the others read back 0.
+        out = (lane == 0) ? m_uart.read((addr - kUartBase) >> 2) : 0x00;
         return true;
     }
 
@@ -410,8 +445,12 @@ bool Bus::write_register(std::uint32_t addr, unsigned lane, std::uint8_t data) {
     if (addr >= kCoproIopBase && addr < kCoproIopBase + 0x1000)
         return true;  // SHARC IOP port is write-only
 
-    if (addr >= kUartBase && addr < kUartBase + 8)
+    if (addr >= kUartBase && addr < kUartBase + 8) {
+        // Only lane 0 is connected (umask32(0x000000ff)).
+        if (lane == 0)
+            m_uart.write((addr - kUartBase) >> 2, data);
         return true;
+    }
 
     if (addr >= kIrqBase && addr < kIrqBase + 8) {
         const std::uint32_t mask = 0xffu << (lane * 8);
@@ -769,6 +808,25 @@ void Bus::irq_update() {
     m_cpu->set_input(1, (m_intreq & 0x002) ? 1 : 0);
     m_cpu->set_input(2, (m_intreq & 0x3fc) ? 1 : 0);
     m_cpu->set_input(3, (m_intreq & 0xc00) ? 1 : 0);
+}
+
+void Bus::sound_ready_w() {
+    // The host's sound interrupt is asserted while the i8251 has a byte ready to
+    // be read or room to accept one; MAME's sound_ready_w does the same.
+    if ((m_uart.txrdy() || m_uart.rxrdy()) && (m_intena & kSoundIrqLine) != 0) {
+        m_intreq |= kSoundIrqLine;
+        irq_update();
+    }
+}
+
+void Bus::tick_sound(int cycles) {
+    // The i8251 shifts a byte out over `cycles` of the host clock, so it is
+    // advanced with the same cycle count the i960 was granted.
+    m_uart.run(static_cast<std::uint32_t>(cycles > 0 ? cycles : 0));
+    m_sound.run(static_cast<std::uint32_t>(cycles > 0 ? cycles : 0));
+    // The board's own activity can make a byte ready, which is the other half of
+    // the interrupt's sources.
+    sound_ready_w();
 }
 
 void Bus::tick(int cycles) {

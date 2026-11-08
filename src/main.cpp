@@ -154,6 +154,36 @@ void write_rgb24(std::FILE* f, const sage::Video& video) {
     }
 }
 
+// Writes a 16-bit stereo WAV header. The data is streamed after it, so the
+// sizes are patched up when the file is closed.
+void write_wav_header(std::FILE* f, std::uint32_t sample_rate) {
+    const std::uint32_t byte_rate = sample_rate * 4;
+    const std::uint16_t block_align = 4;
+    std::uint8_t h[44] = {};
+    std::memcpy(h + 0, "RIFF", 4);
+    std::memcpy(h + 8, "WAVEfmt ", 8);
+    const std::uint32_t fmt_size = 16;
+    const std::uint16_t pcm = 1, channels = 2, bits = 16;
+    std::memcpy(h + 16, &fmt_size, 4);
+    std::memcpy(h + 20, &pcm, 2);
+    std::memcpy(h + 22, &channels, 2);
+    std::memcpy(h + 24, &sample_rate, 4);
+    std::memcpy(h + 28, &byte_rate, 4);
+    std::memcpy(h + 32, &block_align, 2);
+    std::memcpy(h + 34, &bits, 2);
+    std::memcpy(h + 36, "data", 4);
+    std::fwrite(h, 1, sizeof h, f);
+}
+
+void patch_wav_sizes(std::FILE* f, std::uint64_t data_bytes) {
+    const std::uint32_t riff = static_cast<std::uint32_t>(36 + data_bytes);
+    const std::uint32_t data = static_cast<std::uint32_t>(data_bytes);
+    std::fseek(f, 4, SEEK_SET);
+    std::fwrite(&riff, 4, 1, f);
+    std::fseek(f, 40, SEEK_SET);
+    std::fwrite(&data, 4, 1, f);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -197,7 +227,7 @@ int main(int argc, char** argv) {
         bus.set_trace(true);
     if (std::getenv("SAGE_TRACE_IRQ"))
         bus.set_trace_irq(true);
-    bus.attach(loader);
+    bus.attach(loader, game);
 
     if (const char* w = std::getenv("SAGE_WATCH")) {
         unsigned lo = 0, hi = 0;
@@ -312,6 +342,21 @@ int main(int argc, char** argv) {
                 std::printf("Raw video: cannot open %s\n", rv);
         }
 
+        // Optional audio dump: SAGE_WAV writes the SCSP output as 16-bit
+        // stereo so the emulated sound can be listened to or analysed.
+        std::FILE* wav = nullptr;
+        std::uint64_t wav_bytes = 0;
+        if (const char* wp = std::getenv("SAGE_WAV")) {
+            wav = std::fopen(wp, "wb");
+            if (wav) {
+                write_wav_header(wav, bus.sound().sample_rate());
+                std::printf("Audio: streaming SCSP output at %u Hz to %s\n",
+                            bus.sound().sample_rate(), wp);
+            } else {
+                std::printf("Audio: cannot open %s\n", wp);
+            }
+        }
+
         for (long frame = 0; frame < frames && !faulted; ++frame) {
             if (display.is_open() && !display.pump()) {
                 std::printf("  window closed at frame %ld\n", frame);
@@ -334,6 +379,7 @@ int main(int argc, char** argv) {
                 frame_cycles += static_cast<std::uint64_t>(used);
                 bus.tick(used);
                 bus.tick_copro(used);
+                bus.tick_sound(used);
                 cycles += static_cast<std::uint64_t>(used);
                 ++instructions;
                 if (bus.trace()) {
@@ -347,6 +393,14 @@ int main(int argc, char** argv) {
             bus.video().render();
             if (rawvideo)
                 write_rgb24(rawvideo, bus.video());
+            if (wav) {
+                const auto samples = bus.sound().pending_samples();
+                if (!samples.empty()) {
+                    std::fwrite(samples.data(), sizeof(std::int16_t), samples.size(), wav);
+                    wav_bytes += samples.size() * sizeof(std::int16_t);
+                }
+                bus.sound().clear_pending_samples();
+            }
             if (display.is_open()) {
                 display.present(bus.video().rgba());
                 if (std::getenv("SAGE_REALTIME"))
@@ -362,6 +416,11 @@ int main(int argc, char** argv) {
         }
         if (rawvideo)
             std::fclose(rawvideo);
+        if (wav) {
+            patch_wav_sizes(wav, wav_bytes);
+            std::fclose(wav);
+            std::printf("Audio: wrote %" PRIu64 " bytes of PCM\n", wav_bytes);
+        }
         std::printf("------------------------------------------------------------\n\n");
     } else {
         std::printf("Execution trace (%ld instructions)\n", trace_instructions);
@@ -536,6 +595,32 @@ int main(int argc, char** argv) {
                 bus.copro_fault().empty() ? "" : " [FAULT]");
     if (!bus.copro_fault().empty())
         std::printf("  Copro fault     : %s\n", bus.copro_fault().c_str());
+
+    // Sound board: the 68EC000 and the SCSP. The counters show whether the
+    // sound program is running and the host has handed it any commands.
+    {
+        const auto& snd = bus.sound();
+        const auto& scsp = snd.scsp();
+        const auto& sc = scsp.stats();
+        std::printf("  Sound 68EC000   : %s, PC=0x%06X, %" PRIu64 " cycles\n",
+                    snd.present() ? "running" : "absent", snd.cpu().pc(), snd.cpu().cycles());
+        std::printf("  SCSP (YMF292)   : %" PRIu64 " samples, %" PRIu64 " slot starts, peak %d\n",
+                    sc.samples, sc.slot_starts, sc.peak_output);
+        std::printf("  SCSP slots      : %u active of 32, %" PRIu64 " timer IRQs\n",
+                    scsp.active_slots(), sc.timer_interrupts);
+        std::printf("  Sound link      : %" PRIu64 " bytes to SCSP, %" PRIu64
+                    " bytes from SCSP\n",
+                    sc.midi_in_bytes, sc.midi_out_bytes);
+        std::printf("  Sound bus       : %" PRIu64 " SCSP accesses, %" PRIu64
+                    " sample reads, %" PRIu64 "/%" PRIu64 " unmapped R/W\n",
+                    snd.counters().scsp_reads + snd.counters().scsp_writes,
+                    snd.counters().sample_reads, snd.counters().unmapped_reads,
+                    snd.counters().unmapped_writes);
+        std::printf("  Host UART       : %" PRIu64 " bytes sent, %" PRIu64
+                    " received, %" PRIu64 " overruns\n",
+                    bus.uart().counters().bytes_sent, bus.uart().counters().bytes_received,
+                    bus.uart().counters().overruns);
+    }
     std::printf("------------------------------------------------------------\n");
     if (faulted)
         std::printf("  doa.zip mapped and executed; CPU halted on an unimplemented opcode:\n    %s\n",
