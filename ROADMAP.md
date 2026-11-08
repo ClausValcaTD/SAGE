@@ -26,20 +26,23 @@
 ---
 
 ## 🎨 Phase 2: Complete Video Pipeline & Presentation
-- [x] **Milestone 5: 2D Video Engine & Palette Decoding (Current)**
+- [x] **Milestone 5: 2D Video Engine & Palette Decoding**
   - Palette RAM decoding from raw 16-bit Sega BGR to 32-bit RGBA.
   - Connect Color Translation (`colorxlat`) lookup table.
   - System 24 tilemap planes (Text, Foreground, Background) decoding with correct 16-word stride.
-- [ ] **Milestone 6: 3D Polygon Rasterization Engine**
+- [x] **Milestone 6: 3D Polygon Rasterization Engine**
   - Parse Model 2 3D geometry display lists and vertex buffers.
-  - Hardware-accelerated renderer (Vulkan as default, OpenGL/GLES fallback).
-  - Texture mapping from texture ROMs with bilinear filtering options (no disk `texcache`).
-  - Render full 3D characters, arenas, and lighting.
+  - Software scanline rasterizer with perspective-correct interpolation and Z-buffering.
+  - Texture decal mapping from the `textures` ROM region: texture page, palette/luma
+    lookups, and bilinear filtering with mipmaps. Luma RAM is decoded as a
+    half-word-packed array (`umask16(0x00ff)`), so character faces, costume
+    patterns, and arena walls render textured rather than flat-shaded.
+  - Render full 3D characters, arenas, and lighting at 60 FPS.
 
 ---
 
 ## 🔊 Phase 3: Sound System & Cabinet Inputs
-- [ ] **Milestone 7: Sega SCSP Sound Hardware**
+- [x] **Milestone 7: Sega SCSP Sound Hardware**
   - Motorola 68EC000 sound CPU core integration.
   - Yamaha YMF292-F (SCSP) PCM/FM audio synthesis and DSP effects.
   - Synchronization between main CPU, sound CPU, and audio buffer.

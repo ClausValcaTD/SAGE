@@ -199,7 +199,7 @@ private:
     std::vector<std::uint8_t> m_bufferram;    // 0x00900000 (128 KiB, 0x80000-mirrored)
     std::vector<std::uint8_t> m_cpu_ctl;      // 0x00e00000 (0x38)
     std::vector<std::uint8_t> m_prot_ram;     // 0x01d80000 (32 KiB, 0229 source window)
-    std::vector<std::uint8_t> m_luma;         // 0x11400000 (32 KiB)
+    std::vector<std::uint8_t> m_luma;         // 0x11400000 (0x8000 entries, one byte per halfword)
     std::vector<std::uint8_t> m_textureram0;  // 0x11000000 (1 MiB, 0x100000-mirrored)
     std::vector<std::uint8_t> m_textureram1;  // 0x11200000 (1 MiB, 0x100000-mirrored)
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Fetch the reference material and target ROM used by SAGE.
+# Fetch the reference material used by SAGE.
 #
 #   references/model2.cpp, references/model2.h  MAME Model 2 driver (ROM_START)
 #   references/supermodel/                      Model 3 emulator (architecture ref)
-#   roms/doa.zip                                Dead or Alive (Sega Model 2B)
 #
-# The archive.org item stores doa.zip under a nested, space-containing path, so
-# the download URL must be percent-encoded.
+# The game ROMs (roms/doa.zip) are NOT downloaded here. Dead or Alive is
+# copyrighted material; users must supply their own legally obtained ROM set.
+# Place it at roms/doa.zip before running the emulator.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,9 +27,11 @@ else
     echo "    already present, skipping"
 fi
 
-echo "==> Dead or Alive ROM set (doa.zip)"
-doa_url="https://archive.org/download/m2emu1.1a/Sega%20Model%202%20Emu%201.1a%20and%20Full%20Romset/Model%202%20Romset%20%28Merged%29/doa.zip"
-curl -fL --retry 3 -o "$roms/doa.zip" "$doa_url"
+if [ ! -f "$roms/doa.zip" ]; then
+    echo "==> Dead or Alive ROM set not found at roms/doa.zip"
+    echo "    SAGE does not distribute game ROMs. Supply your own legally"
+    echo "    obtained 'doa' set (MAME-compatible) at roms/doa.zip."
+fi
 
 echo "==> Done"
-ls -la "$roms/doa.zip"
+ls -la "$roms" 2>/dev/null || true

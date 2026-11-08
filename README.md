@@ -3,9 +3,11 @@
 A modern C++20 emulator project. The first target is **Dead or Alive** on Sega
 **Model 2B** hardware (i960 main CPU + 315-5881 GPU + SCSP sound).
 
-This initial milestone implements the **ROM loader**: it parses a MAME-compatible
-`doa.zip` and assembles the game's memory regions exactly the way MAME's
-`ROM_START( doa )` / `ROM_START( doab )` in `src/mame/sega/model2.cpp` describe.
+Current status: Dead or Alive boots, the dual-CPU (i960 + ADSP-21062 SHARC)
+pipeline runs with FIFO backpressure, the System 24 2D tilemap/text layers
+render, and the 3D engine rasterizes textured characters and arenas at 60 FPS.
+The Yamaha YMF292-F (SCSP) + 68EC000 sound board is implemented. See
+[`ROADMAP.md`](ROADMAP.md) for the milestone list.
 
 ## 📸 Screenshots
 
@@ -20,17 +22,22 @@ SAGE/
 │   ├── rom_loader.h        RomLoader interface
 │   ├── types.h             Region / RomVerify / LoadReport
 │   ├── bus.h               Model 2B memory interconnect
-│   └── cpu/i960.h          standalone i960 CPU + disassembler
+│   ├── geometry.h          Model 2 3D geometry + rasterizer
+│   ├── video.h             System 24 2D tilemap / palette / scanout
+│   ├── display.h           SDL2 window / present
+│   ├── cpu/                i960, m68000 (68EC000), sharc
+│   └── hw/                 SCSP, SCSP DSP, i8251, sound board
 ├── src/
-│   ├── main.cpp            CLI, status tables, boot trace
+│   ├── main.cpp            CLI, status tables, boot trace, frame loop
 │   ├── rom_loader.cpp      ROM table + load/verify implementation
 │   ├── bus.cpp             address decoding + RAM/ROM
-│   └── cpu/
-│       ├── i960.cpp        instruction interpreter
-│       └── i960dis.cpp     instruction disassembler
-├── scripts/fetch_assets.sh downloads references + doa.zip
+│   ├── geometry.cpp        display-list parse + scanline texture rasterizer
+│   ├── video.cpp           2D tilemaps + palette decoding
+│   ├── cpu/                i960, m68000, sharc cores
+│   └── hw/                 sound_board, scsp, scsp_dsp, i8251
+├── scripts/fetch_assets.sh downloads references (no ROMs)
 ├── references/             MAME sources + Supermodel (git-ignored)
-└── roms/                   doa.zip (git-ignored)
+└── roms/                   doa.zip (git-ignored, user-supplied)
 ```
 
 ## Fetching assets
@@ -39,8 +46,10 @@ SAGE/
 ./scripts/fetch_assets.sh      # or: cmake --build build --target fetch-assets
 ```
 
-This pulls the MAME Model 2 driver sources, a shallow clone of Supermodel
-(architecture reference), and `roms/doa.zip` from the Internet Archive.
+This pulls the MAME Model 2 driver sources and a shallow clone of Supermodel
+(architecture reference). It does **not** download game ROMs: Dead or Alive is
+copyrighted material, so supply your own legally obtained `doa.zip` (a
+MAME-compatible `doa` set) at `roms/doa.zip` before running.
 
 ## Build and run
 

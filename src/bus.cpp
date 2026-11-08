@@ -48,6 +48,11 @@ constexpr std::size_t kBackupSize = 0x00004000;
 constexpr std::size_t kCpuCtlSize = 0x00000038;
 constexpr std::size_t kProtSize = 0x00008000;
 constexpr std::size_t kTextureSize = 0x00100000;  // mirrored across 0x100000
+// Luma RAM: the 0x11400000-0x1140ffff aperture is mapped umask16(0x00ff), so one
+// byte is stored per 16-bit half-word and the array index is the byte offset >> 1.
+// The renderer indexes it as `lumaram[lumabase + (t >> 1)]`, so the packed array
+// is 0x8000 bytes (MAME: `make_unique_clear<u8[]>(0x8000)`).
+constexpr std::size_t kLumaSpan = 0x00010000;
 
 // The i960 on the Model 2 CPU board runs from a 50 MHz crystal divided by two.
 constexpr std::uint32_t kCpuClock = 25'000'000;
@@ -308,10 +313,10 @@ std::uint8_t* Bus::map(std::uint32_t addr, std::size_t len, bool& writable) cons
                ((addr - kTexture1Base) % m_textureram1.size());
     }
 
-    if (in_range(addr, len, kLumaBase, m_luma.size())) {
-        writable = true;
-        return const_cast<std::uint8_t*>(m_luma.data()) + (addr - kLumaBase);
-    }
+    // Luma RAM is deliberately not mapped here: its 16-bit aperture packs one
+    // byte per half-word (umask16(0x00ff)), so a plain byte window would put the
+    // game's word writes at every other offset and the renderer would read
+    // zeros. It is decoded explicitly in the read/write entry points instead.
 
     if (std::uint8_t* p = m_video.map(addr, len)) {
         writable = true;  // all video apertures are RAM
@@ -522,6 +527,13 @@ void Bus::watch_log(char op, std::uint32_t addr, std::uint32_t data) const {
 }
 
 std::uint8_t Bus::raw_read8(std::uint32_t addr) const {
+    // Luma RAM: umask16(0x00ff) over a 0x10000-byte aperture packs one byte per
+    // 16-bit half-word, so the array index is the byte offset >> 1.
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        return idx < m_luma.size() ? m_luma[idx] : 0;
+    }
+
     bool w = false;
     if (const std::uint8_t* p = map(addr, 1, w))
         return *p;
@@ -546,6 +558,12 @@ std::uint8_t Bus::read8(std::uint32_t addr) const {
 
 std::uint16_t Bus::read16(std::uint32_t addr) const {
     watch_log('R', addr, 0);
+
+    // Luma RAM: one byte per 16-bit half-word, returned in the low lane.
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        return idx < m_luma.size() ? m_luma[idx] : 0;
+    }
 
     // 317-0229 registers overlay the tail of the protection source RAM window,
     // so they must be decoded before the RAM fallback (matches MAME's
@@ -576,6 +594,15 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
     watch_log('R', addr, 0);
     if (m_trace) ++m_read_hist[addr & 0xfffc0000];
 
+    // Luma RAM: umask16(0x00ff) means a 32-bit access gathers two 16-bit
+    // half-word reads, each one byte in its low lane.
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        const std::uint32_t lo = idx < m_luma.size() ? m_luma[idx] : 0;
+        const std::uint32_t hi = idx + 1 < m_luma.size() ? m_luma[idx + 1] : 0;
+        return lo | (hi << 16);
+    }
+
     if (addr >= kCoproFifoBase && addr < kCoproFifoBase + 0x4000)
         return copro_fifo_r();
 
@@ -603,6 +630,12 @@ std::uint32_t Bus::read32(std::uint32_t addr) const {
 void Bus::write8(std::uint32_t addr, std::uint8_t val) {
     if (m_trace) ++m_write_hist[addr & 0xfffc0000];
     watch_log('W', addr, val);
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        if (idx < m_luma.size())
+            m_luma[idx] = val;
+        return;
+    }
     bool w = false;
     if (std::uint8_t* p = map(addr, 1, w)) {
         if (w) {
@@ -640,6 +673,14 @@ void Bus::write8(std::uint32_t addr, std::uint8_t val) {
 void Bus::write16(std::uint32_t addr, std::uint16_t val) {
     watch_log('W', addr, val);
 
+    // Luma RAM: one byte per 16-bit half-word (umask16(0x00ff)).
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        if (idx < m_luma.size())
+            m_luma[idx] = static_cast<std::uint8_t>(val);
+        return;
+    }
+
     // Protection registers overlay the source RAM window; decode them first.
     if (addr >= kProtBase + 0x7ff4 && addr < kProtBase + 0x7ff8) {
         m_protection.table_w((addr - (kProtBase + 0x7ff4)) >> 1, val);
@@ -665,6 +706,17 @@ void Bus::write16(std::uint32_t addr, std::uint16_t val) {
 
 void Bus::write32(std::uint32_t addr, std::uint32_t val) {
     watch_log('W', addr, val);
+
+    // Luma RAM: one byte per 16-bit half-word (umask16(0x00ff)). A 32-bit store
+    // covers two half-words, so it writes two consecutive entries.
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) {
+        const std::size_t idx = (addr - kLumaBase) >> 1;
+        if (idx < m_luma.size())
+            m_luma[idx] = static_cast<std::uint8_t>(val);
+        if (idx + 1 < m_luma.size())
+            m_luma[idx + 1] = static_cast<std::uint8_t>(val >> 16);
+        return;
+    }
 
     // Protection registers overlay the source RAM window; decode them first.
     if (addr >= kProtBase + 0x7ff0 && addr < kProtBase + 0x7ff4) {
@@ -762,6 +814,9 @@ bool Bus::burst(std::uint32_t addr) const {
     // both qualify; otherwise ldq/stq fold onto a single word.
     if (addr >= kGeoPrgBase && addr < kGeoPrgBase + 0x4000) return true;
     if (addr >= kCoproFunctionBase && addr < kCoproFunctionBase + 0x4000) return true;
+    // Luma RAM is flagged BURST in MAME; it is decoded outside map(), so it must
+    // be listed here explicitly.
+    if (addr >= kLumaBase && addr < kLumaBase + kLumaSpan) return true;
     // The CPU wait-state block is the one plain-RAM aperture MAME leaves non-BURST.
     if (addr >= kCpuCtlBase && addr < kCpuCtlBase + kCpuCtlSize) return false;
     bool w = false;
