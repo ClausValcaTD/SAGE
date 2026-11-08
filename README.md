@@ -9,9 +9,13 @@ render, and the 3D engine rasterizes textured characters and arenas at 60 FPS.
 The Yamaha YMF292-F (SCSP) + 68EC000 sound board is implemented. See
 [`ROADMAP.md`](ROADMAP.md) for the milestone list.
 
-## 📸 Screenshots
+## 📸 Screenshots & Showcase
 
 ![Dead or Alive 3D Rendering](docs/screenshots/doa_3d_title.png)
+
+▶️ **[Watch the 60-second showcase](docs/videos/doa_showcase.mp4)** — the full
+attract-mode sequence with textured 3D characters and arenas plus synchronized
+Yamaha SCSP (YMF292-F) audio, captured at 496x384 / 60 FPS and upscaled 2x.
 
 ## Layout
 
