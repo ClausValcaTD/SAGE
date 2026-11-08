@@ -4,6 +4,16 @@ Repo: `M5Devs/SAGE` — "Sega Arcade Golden-era Emulator", modern C++20 + CMake.
 Target game: **Dead or Alive**, Sega **Model 2B** (i960 main CPU + 315-5881 GPU +
 SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 
+## Final Graphics Polish audit (2026-11-08)
+The "four visual artifacts" task (colored/solid shadows, untextured background,
+face/hair alpha, missing TECMO/DOA logos) does **not** reproduce. `draw_scanline_solid`,
+`draw_scanline_tex`, `check_culling` and `process_polygon` are byte-faithful to MAME
+(references/i960/* verified identical to upstream master). Evidence: feet strip is
+dark grey (#4a4a4a), 3D layer @1500 = 703 colours, TECMO(red)+DOA title render at
+f1070-1140. Do not "fix" these by inventing changes. Real latent gap:
+`Video::draw_tile_layers` omits MAME's `ctrl & 0x6000` window/line-scroll modes and
+the `0x6800` mask base; DOA never uses them, so no effect.
+
 ## Build environment
 - `cmake`/`ninja`/`unzip` are **not** preinstalled; install with
   `sudo -n apt-get update && sudo -n apt-get install -y cmake ninja-build unzip`
