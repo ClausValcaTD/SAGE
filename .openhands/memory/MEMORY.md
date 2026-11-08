@@ -44,8 +44,10 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 
 ## Conventions
 - `.gitignore`: `build/`, `references/`, `roms/`, `*.zip`.
-- `scripts/fetch_assets.sh` re-downloads references + doa.zip; exposed as the
-  optional CMake target `fetch-assets` (not part of the default build).
+- `scripts/fetch_assets.sh` downloads references only (MAME sources + Supermodel)
+  as of 2026-11-08. It used to auto-download `roms/doa.zip` from archive.org;
+  that was removed for legal hygiene — users supply their own ROM set. Still
+  exposed as the optional CMake target `fetch-assets` (not in the default build).
 - `.openhands/memory/legacy-openrom-memory.md` is stale content from an unrelated
   OpenROM Marketplace project that previously occupied this path; ignore it.
 
@@ -423,3 +425,29 @@ SCSP sound). `README.md`, `LICENSE` (GPL), and `.openhands/` were pre-existing.
 - Verified: sound program runs, SCSP keys slots and produces structured audio;
   rendered video is byte-identical to before (cmp of SAGE_RAWVIDEO).
 - Details in `.openhands/memory/2026-11-05.md`. Branch `feat/scsp-sound-board`.
+
+## 3D texture fix + SCSP merge (2026-11-08)
+- Merged `feat/scsp-sound-board` into `main` (`--no-ff`, merge commit `78fd437`);
+  the branch existed only in a sibling clone, not on the remote. Clean Release
+  build, 0 errors (only miniz + sharc warnings). Pushed main + the feature branch.
+- **Root cause of flat-shaded 3D (10 colours): luma RAM addressing.**
+  `0x11400000-0x1140ffff` is mapped `umask16(0x00ff)` on Model 2B — one byte per
+  **16-bit half-word**, array index `(addr - base) >> 1`, packed array 0x8000 bytes
+  (MAME: `make_unique_clear<u8[]>(0x8000)`). SAGE had mapped it as a plain byte
+  window, so the i960's word writes landed on even offsets with zeros interleaved
+  and the renderer's contiguous read `lumaram[lumabase + (t >> 1)]` always
+  returned 0 → one flat colour per polygon. Fix: decode luma explicitly in
+  `read8/16/32` + `write8/16/32`, keep it BURST-flagged (MAME does), and remove it
+  from `Bus::map()`. See `references/sm2_emu/src/hw/model2b.cpp` (validated port).
+- **Diagnostic that found it**: instrument `poly.luma`/`poly.lumabase` (both were
+  sane: luma 176-255, lumabase 12544-12800) vs the computed `luma` (always 0) →
+  the luma *curve* lookup was the zero, not the polygon fields. Counting nonzero
+  bytes showed values at even offsets only (12204 even / 0 odd).
+- **Metric**: 3D layer (`SAGE_PPM3D`) unique colours 10 → 703; composited title
+  frame 25 → 718. Non-black 3D px 33.7k → 117k. Frame 1500 still matches the
+  title screen (lumcorr 0.72 vs the old screenshot).
+- Texel pipeline itself (`get_texel`, `fetch_bilinear_texel`, texsheet ROM/RAM
+  select, colorxlat, gamma) already matched MAME — only luma was broken.
+- Debug hooks used: temporary static counters in `render_one` and tracing in
+  `fetch_bilinear_texel`; reverted before committing. PPM analysis with Pillow +
+  numpy (pip3), ASCII-art dump for frame selection.
