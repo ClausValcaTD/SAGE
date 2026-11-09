@@ -1370,6 +1370,14 @@ void Geometry::render_one(Polygon& poly) {
         }
     }
 
+    // Discard textured polygons with an invalid texture sheet — prevents rogue
+    // neon green/cyan triangles from garbled texture headers. Solid polygons
+    // (renderer & 2 == 0) intentionally leave texsheet/texwidth/texheight at
+    // their defaults and are unaffected.
+    if ((renderer & 2) &&
+        (poly.texsheet[0] == nullptr || poly.texwidth == 0 || poly.texheight == 0))
+        return;
+
     // The 3D rasteriser clips to the viewport rectangle only (the polygon
     // clipping already happened in hardware space).
     m_clip_l = vp_left;
@@ -1673,32 +1681,28 @@ u32 Geometry::fetch_bilinear_texel(const Polygon& poly, s32 miplevel, s32 u, s32
 
     u32 ufrac = static_cast<u32>(u) & 0xff;
     u32 vfrac = static_cast<u32>(v) & 0xff;
-    u32 u0 = (static_cast<u32>(u) >> 8) & (tex_width - 1);
-    u32 u1 = (u0 + 1) & (tex_width - 1);
-    u32 v0 = (static_cast<u32>(v) >> 8) & (tex_height - 1);
-    u32 v1 = (v0 + 1) & (tex_height - 1);
+    s32 u0 = static_cast<s32>(u) >> 8;
+    s32 u1 = u0 + 1;
+    s32 v0 = static_cast<s32>(v) >> 8;
+    s32 v1 = v0 + 1;
 
-    if (!tex_wrap_x && u1 == 0) {
-        if (ufrac >= 0x80) {
-            u0 = u1;
-            u1++;
-            ufrac = 0;
-        } else {
-            u1 = u0;
-            u0--;
-            ufrac = 0x100;
-        }
+    if (tex_wrap_x) {
+        u0 = static_cast<s32>(static_cast<u32>(u0) & (tex_width - 1));
+        u1 = static_cast<s32>(static_cast<u32>(u1) & (tex_width - 1));
+    } else {
+        if (u0 < 0) u0 = 0;
+        if (u0 >= static_cast<s32>(tex_width)) u0 = static_cast<s32>(tex_width) - 1;
+        if (u1 < 0) u1 = 0;
+        if (u1 >= static_cast<s32>(tex_width)) u1 = static_cast<s32>(tex_width) - 1;
     }
-    if (!tex_wrap_y && v1 == 0) {
-        if (vfrac >= 0x80) {
-            v0 = 0;
-            v1++;
-            vfrac = 0;
-        } else {
-            v1 = v0;
-            v0--;
-            vfrac = 0x100;
-        }
+    if (tex_wrap_y) {
+        v0 = static_cast<s32>(static_cast<u32>(v0) & (tex_height - 1));
+        v1 = static_cast<s32>(static_cast<u32>(v1) & (tex_height - 1));
+    } else {
+        if (v0 < 0) v0 = 0;
+        if (v0 >= static_cast<s32>(tex_height)) v0 = static_cast<s32>(tex_height) - 1;
+        if (v1 < 0) v1 = 0;
+        if (v1 >= static_cast<s32>(tex_height)) v1 = static_cast<s32>(tex_height) - 1;
     }
 
     u32 tex00 = static_cast<u32>(get_texel(tex_x, tex_y, static_cast<int>(u0), static_cast<int>(v0), sheet)) << 4;
@@ -1815,6 +1819,10 @@ void Geometry::draw_scanline_tex(int scanline, const Extent& extent, const Polyg
         const s32 v = static_cast<s32>(voz * z * 256.0f);
 
         u32 t = fetch_bilinear_texel<Translucent>(poly, level, u, v);
+
+        // Alpha discard: pen 0 (transparent texel on decals) never writes.
+        if (t == 0)
+            continue;
 
         if (mml > 0 && level < max_level) {
             const u32 t2 = fetch_bilinear_texel<Translucent>(poly, level + 1, u, v);
