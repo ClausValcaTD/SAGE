@@ -13,6 +13,13 @@ The Yamaha YMF292-F (SCSP) + 68EC000 sound board is implemented. See
 
 ![Dead or Alive 3D Rendering](docs/screenshots/doa_3d_title.png)
 
+Clean-capture verification of the `af56890` rendering fixes (UV clamping,
+alpha discard, invalid-texture guard):
+
+| Sky — no floating trees, no red bar | Kasumi — clean facial skin |
+| :---: | :---: |
+| ![Sky with no texture bleed](docs/screenshots/doa_sky_fixed.png) | ![Kasumi with clean facial skin](docs/screenshots/doa_kasumi_fixed.png) |
+
 ▶️ **[Watch the 60-second showcase](docs/videos/doa_showcase.mp4)** — the full
 attract-mode sequence with textured 3D characters and arenas plus synchronized
 Yamaha SCSP (YMF292-F) audio, captured at 496x384 / 60 FPS and upscaled 2x.
