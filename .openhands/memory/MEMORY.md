@@ -14,10 +14,26 @@ f1070-1140. Do not "fix" these by inventing changes. Real latent gap:
 `Video::draw_tile_layers` omits MAME's `ctrl & 0x6000` window/line-scroll modes and
 the `0x6800` mask base; DOA never uses them, so no effect.
 
+## Clean-capture screenshots (2026-11-09, commit `11fd7cb`)
+- `doa_sky_fixed.png` = frame **1200**, `doa_kasumi_fixed.png` = frame **1500**,
+  native 496x384 via plain `PIL Image.open(ppm).save(png)` (NO resize). Exporting
+  this way reproduces the canonical prior `doa_sky_fixed.png` byte-for-byte
+  (md5 `469e6c64df3f5f773419dc564f446522`) — see `2026-11-09.md`.
+- The **Release build is deterministic**: a fresh `cmake -B build
+  -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4` reproduced prior
+  sessions' `/tmp/frame{1200,1500}.ppm` md5 exactly.
+- af56890 fix effect (before = parent `f94c9d5`): first differing frame is
+  **1144**; change is ~0.2-0.4% of pixels, turning near-black bleed/alpha blocks
+  into clean sky/skin. **Green/red pixel masks are identical before vs after** —
+  the fix removes dark blocks, not green trees / a red bar.
+- `doa_3d_title.png` == `doa_combat_verified.png` == frame 1500 upscaled 2x
+  nearest (both md5 `35dd5dc4…`); the latter is the *pre-fix* f1500.
+
 ## Build environment
-- `cmake`/`ninja`/`unzip` are **not** preinstalled; install with
-  `sudo -n apt-get update && sudo -n apt-get install -y cmake ninja-build unzip`
-  (plain `apt-get` has no lock; `apt-get update` first or packages 404).
+- `cmake` is **not** preinstalled. `python3 -m pip install --user cmake` (4.4.4,
+  lands in `~/.local/bin`, add to PATH) works; `pip install --user numpy` too.
+  (Older note: `sudo -n apt-get update && sudo -n apt-get install -y cmake
+  ninja-build unzip`.)
 - g++ 14.2, CMake 3.31, 4 cores. `file` command is absent.
 - miniz via FetchContent tag **3.1.2**; set `MINIZ_STANDALONE_PROJECT OFF` before
   `FetchContent_MakeAvailable` so it doesn't pull in its examples/tests.
